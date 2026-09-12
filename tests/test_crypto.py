@@ -32,6 +32,15 @@ def test_wrong_length_key() -> None:
         Crypto(base64.b64encode(os.urandom(16)).decode())
 
 
+def test_auth_token_stable_and_not_the_key() -> None:
+    key = generate_key_b64()
+    crypto = Crypto(key)
+    token = crypto.auth_token()
+    assert len(token) == 64
+    assert crypto.auth_token() == token
+    assert token != key
+
+
 def test_tampered_payload_fails() -> None:
     crypto = Crypto(generate_key_b64())
     payload = bytearray(crypto.encrypt(b"data"))

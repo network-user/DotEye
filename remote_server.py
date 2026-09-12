@@ -30,7 +30,7 @@ from doteye.remote import RemoteServer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="DotEye remote inference server")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8099)
     parser.add_argument("--backend", default="auto",
                         choices=["auto", "yolo", "yunet", "motion"])
@@ -38,11 +38,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--conf", type=float, default=0.5)
     parser.add_argument("--face-model", default="", help="ONNX YuNet для backend=yunet")
+    parser.add_argument("--workers", type=int, default=2, help="одновременные запросы инференса")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not 1 <= args.workers <= 16:
+        raise SystemExit("--workers должен быть в диапазоне 1..16")
+    if not 0.0 <= args.conf <= 1.0:
+        raise SystemExit("--conf должен быть в диапазоне 0..1")
     settings = get_settings()
 
     try:
@@ -59,7 +64,7 @@ def main() -> None:
         f"device {args.device}"
     )
 
-    server = RemoteServer(args.host, args.port, detector.detect, crypto)
+    server = RemoteServer(args.host, args.port, detector.detect, crypto, max_workers=args.workers)
     print(f"[remote] слушаю http://{args.host}:{args.port} (POST /detect, GET /health)")
     try:
         server.serve_forever()

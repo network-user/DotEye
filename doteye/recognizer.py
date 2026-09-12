@@ -48,12 +48,19 @@ class DummyRecognizer(Recognizer):
 
 
 class InsightFaceRecognizer(Recognizer):
-    """insightface FaceAnalysis (buffalo_l), CPU по умолчанию."""
+    """insightface FaceAnalysis (buffalo_l), CPU или CUDA."""
 
-    def __init__(self, ctx_id: int = -1) -> None:
+    def __init__(self, device: str = "cpu") -> None:
         from insightface.app import FaceAnalysis
 
-        self._app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+        self._device = device
+        if device == "cuda":
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ctx_id = 0
+        else:
+            providers = ["CPUExecutionProvider"]
+            ctx_id = -1
+        self._app = FaceAnalysis(name="buffalo_l", providers=providers)
         self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
     def available(self) -> bool:
@@ -63,7 +70,6 @@ class InsightFaceRecognizer(Recognizer):
         faces = self._app.get(frame)
         if not faces:
             return None
-        # берём самое крупное лицо в кадре
         face = max(
             faces,
             key=lambda f: float((f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])),
@@ -73,13 +79,15 @@ class InsightFaceRecognizer(Recognizer):
     def distance(self, a: bytes, b: bytes) -> float:
         va = np.frombuffer(a, dtype="<f4")
         vb = np.frombuffer(b, dtype="<f4")
+        if va.size == 0 or vb.size == 0 or va.size != vb.size:
+            return 1.0
         denom = float(np.linalg.norm(va) * np.linalg.norm(vb)) + 1e-9
         return float(1.0 - np.dot(va, vb) / denom)
 
 
-def build_recognizer() -> Recognizer:
+def build_recognizer(device: str = "cpu") -> Recognizer:
     try:
-        return InsightFaceRecognizer()
+        return InsightFaceRecognizer(device=device)
     except Exception as exc:
         print(f"[recognizer] insightface недоступен ({exc}); identity -> DummyRecognizer")
         return DummyRecognizer()

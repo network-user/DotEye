@@ -61,3 +61,42 @@ def test_remote_detector_survives_bad_server(crypto: Crypto) -> None:
     detector = RemoteDetector("http://127.0.0.1:1", crypto=crypto, timeout=0.2)
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
     assert detector.detect(frame) == []
+    assert detector.last_error
+
+
+def test_remote_fallback_used_when_server_down(crypto: Crypto) -> None:
+    class Local:
+        backend = "yolo"
+
+        def detect(self, frame):
+            return [(2, 2, 4, 4)]
+
+        def close(self):
+            pass
+
+    detector = RemoteDetector(
+        "http://127.0.0.1:1", crypto=crypto, timeout=0.2, fallback=Local(),
+    )
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    assert detector.detect(frame) == [(2, 2, 4, 4)]
+    assert detector.using_fallback is True
+    detector.close()
+
+
+def test_detect_rejects_bad_token(crypto: Crypto) -> None:
+    from doteye.crypto import generate_key_b64
+    from doteye.remote import RemoteClient, RemoteServer
+
+    def detect(frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+        return [(1, 1, 2, 2)]
+
+    server = RemoteServer("127.0.0.1", 0, detect, crypto)
+    port = server._server.server_address[1]
+    server.start()
+    try:
+        other = Crypto(generate_key_b64())
+        client = RemoteClient(f"http://127.0.0.1:{port}", other, timeout=2.0)
+        with pytest.raises(RuntimeError, match="токен|401|HTTP"):
+            client.detect(np.zeros((8, 8, 3), dtype=np.uint8))
+    finally:
+        server.stop()

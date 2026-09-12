@@ -10,6 +10,7 @@
   auto   - первый доступный из yolo -> yunet -> motion
 
 Инференс может работать локально или на отдельном сервере (remote).
+При падении remote можно уйти на локальный fallback.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ CLASS_PERSON = 0
 
 
 class Detector(ABC):
+    last_error: str | None = None
+
     @abstractmethod
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Вернуть список боксов людей: (x1, y1, x2, y2)."""
@@ -43,25 +46,35 @@ class Detector(ABC):
 class LocalDetector(Detector):
     """YOLO в текущем процессе (CPU/GPU)."""
 
-    def __init__(self, model_path: str, device: str, min_conf: float) -> None:
+    def __init__(self, model_path: str, device: str, min_conf: float, imgsz: int = 640) -> None:
         from ultralytics import YOLO
 
         self._model = YOLO(model_path)
         self._device = device
         self._min_conf = min_conf
+        self._imgsz = int(imgsz)
+
+    @property
+    def backend(self) -> str:
+        return "yolo"
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
-        results = self._model.predict(
-            source=frame,
-            classes=[CLASS_PERSON],
-            conf=self._min_conf,
-            verbose=False,
-            device=self._device,
-        )
+        kwargs: dict = {
+            "source": frame,
+            "classes": [CLASS_PERSON],
+            "conf": self._min_conf,
+            "verbose": False,
+            "device": self._device,
+            "imgsz": self._imgsz,
+        }
+        if self._device == "cuda":
+            kwargs["half"] = True
+        results = self._model.predict(**kwargs)
         boxes: list[tuple[int, int, int, int]] = []
         for r in results:
             for b in r.boxes.xyxy.cpu().numpy():
                 boxes.append(tuple(int(v) for v in b))
+        self.last_error = None
         return boxes
 
     def close(self) -> None:
@@ -82,6 +95,10 @@ class YuNetDetector(Detector):
         self._det = cv2.FaceDetectorYN.create(
             model_path, "", (320, 320), score_threshold=min_conf
         )
+
+    @property
+    def backend(self) -> str:
+        return "yunet"
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         h, w = frame.shape[:2]
@@ -114,11 +131,15 @@ class MotionDetector(Detector):
         self._seen = 0
         self._bg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=25)
 
+    @property
+    def backend(self) -> str:
+        return "motion"
+
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         mask = self._bg.apply(frame)
         self._seen += 1
         if self._seen <= self._warmup:
-            return []  # фон ещё не построен, не считаем весь кадр движением
+            return []
         mask = cv2.medianBlur(mask, 5)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes: list[tuple[int, int, int, int]] = []
@@ -133,34 +154,86 @@ class MotionDetector(Detector):
         pass
 
 
+class MotionGate:
+    """Дешёвый фильтр: нет движения и нет треков - YOLO можно не гонять."""
+
+    def __init__(self, min_pixels: int = 1500) -> None:
+        self._prev: np.ndarray | None = None
+        self._min_pixels = min_pixels
+
+    def moved(self, frame: np.ndarray) -> bool:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        if self._prev is None:
+            self._prev = gray
+            return True
+        diff = cv2.absdiff(self._prev, gray)
+        self._prev = gray
+        _, th = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+        return int(cv2.countNonZero(th)) >= self._min_pixels
+
+
 class RemoteDetector(Detector):
     """Передаёт кадры на отдельный сервер обработки (см. remote.py).
 
     Кадр шифруется AES-256-GCM и уходит POST-ом; сервер возвращает боксы.
-    Если сервер недоступен или ключа нет, детектор возвращает пустой список,
-    не роняя пайплайн.
+    Если сервер недоступен, при наличии fallback идёт локальный детектор,
+    иначе пустой список (пайплайн не падает). last_error при этом заполнен.
     """
 
-    def __init__(self, remote_url: str, crypto: "Crypto | None" = None,
-                 timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        remote_url: str,
+        crypto: "Crypto | None" = None,
+        timeout: float = 10.0,
+        fallback: Detector | None = None,
+        insecure: bool = False,
+    ) -> None:
         from doteye.remote import RemoteClient
 
         self._url = remote_url
         self._crypto = crypto
-        self._client = RemoteClient(remote_url, crypto, timeout) if crypto else None
+        self._fallback = fallback
+        self.using_fallback = False
+        self.last_error: str | None = None
+        self._client = (
+            RemoteClient(remote_url, crypto, timeout, insecure=insecure)
+            if crypto and remote_url
+            else None
+        )
+
+    @property
+    def backend(self) -> str:
+        if self.using_fallback and self._fallback is not None:
+            return f"remote-fallback:{self._fallback.backend}"
+        return "remote"
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         if self._client is None:
-            print("[detector] remote: DOTEYE_CRYPTO_KEY не задан, кадр не отправлен")
-            return []
+            self.last_error = "нет ключа или URL remote"
+            return self._fallback_detect(frame)
         try:
-            return self._client.detect(frame)
+            boxes = self._client.detect(frame)
+            self.last_error = None
+            self.using_fallback = False
+            return boxes
         except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
             print(f"[detector] remote недоступен: {exc}")
+            return self._fallback_detect(frame)
+
+    def _fallback_detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+        if self._fallback is None:
+            self.using_fallback = False
             return []
+        self.using_fallback = True
+        return self._fallback.detect(frame)
 
     def close(self) -> None:
-        pass
+        if self._fallback is not None:
+            self._fallback.close()
+        if self._client is not None:
+            self._client.close()
 
 
 def yolo_available() -> bool:
@@ -171,21 +244,13 @@ def yolo_available() -> bool:
     return True
 
 
-def build_detector(kind: str, model_path: str, device: str, min_conf: float,
-                   remote: bool, remote_url: str, face_model: str = "",
-                   crypto: "Crypto | None" = None) -> Detector:
-    """Собрать детектор. kind: auto | yolo | yunet | motion.
-
-    remote перекрывает всё. auto идёт по цепочке yolo -> yunet -> motion.
-    """
-    if remote:
-        return RemoteDetector(remote_url, crypto)
-
+def _build_local(kind: str, model_path: str, device: str, min_conf: float,
+                 face_model: str, imgsz: int) -> Detector:
     kind = (kind or "auto").lower()
 
     if kind in ("auto", "yolo") and yolo_available():
         try:
-            return LocalDetector(model_path, device, min_conf)
+            return LocalDetector(model_path, device, min_conf, imgsz=imgsz)
         except Exception as exc:
             print(f"[detector] YOLO не загрузился ({exc})")
     elif kind == "yolo":
@@ -202,3 +267,27 @@ def build_detector(kind: str, model_path: str, device: str, min_conf: float,
 
     print("[detector] motion-режим (MOG2): детекция движения, не людей")
     return MotionDetector(min_conf)
+
+
+def build_detector(kind: str, model_path: str, device: str, min_conf: float,
+                   remote: bool, remote_url: str, face_model: str = "",
+                   crypto: "Crypto | None" = None, imgsz: int = 640,
+                   remote_fallback: bool = False,
+                   remote_insecure: bool = False) -> Detector:
+    """Собрать детектор. kind: auto | yolo | yunet | motion.
+
+    remote перекрывает локальный бэкенд. auto идёт по цепочке yolo -> yunet -> motion.
+    """
+    if remote:
+        fallback: Detector | None = None
+        if remote_fallback:
+            fallback = _build_local(kind, model_path, device, min_conf, face_model, imgsz)
+        if not remote_url:
+            print("[detector] remote включён, URL пуст")
+            if fallback is not None:
+                return fallback
+        return RemoteDetector(
+            remote_url, crypto, fallback=fallback, insecure=remote_insecure,
+        )
+
+    return _build_local(kind, model_path, device, min_conf, face_model, imgsz)
