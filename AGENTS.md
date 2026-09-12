@@ -30,9 +30,11 @@ python -m doteye.main
 | Установка | `pip install -r requirements.txt` |
 | Установка (dev + тесты) | `pip install -r requirements-dev.txt` |
 | Запуск | `python -m doteye.main` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/runtime.py doteye/storage.py run.py bench.py` |
+| Remote-сервер | `python -m doteye.remote_server --host 0.0.0.0 --port 8099` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/runtime.py doteye/storage.py remote_server.py run.py bench.py` |
 | Тесты | `python -m pytest tests -q` |
 | Бенчмарк | `python bench.py` |
+| Docker | `docker compose up -d --build doteye` |
 | Lint / typecheck | — |
 
 ## Структура репозитория
@@ -45,14 +47,17 @@ doteye/
 ├── models.py      каталог YOLO-моделей с описаниями для панели
 ├── bot.py         aiogram 3: роутер, FSM-диалоги, админ-панель, уведомления
 ├── camera.py      источники кадров: вебка / RTSP / MJPEG (фабрика)
-├── detector.py    детекция: yolo | yunet | motion, auto-деградация, remote-заглушка
+├── detector.py    детекция: yolo | yunet | motion, auto-деградация, remote
+├── remote.py      HTTP + AES-GCM: клиент и сервер remote-инференса
 ├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
 ├── crypto.py      AES-256-GCM (кадры, embeddings, remote)
 ├── pipeline.py    цикл камера -> детекция -> событие, пересборка, кулдаун на человека
 └── storage.py     SQLite (thread-safe): people, events, settings
-tests/             pytest: crypto, storage, pipeline, detector, models, bot
+tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote
 bench.py           бенчмарк детектора: FPS и время инференса
+remote_server.py   точка входа remote-сервера инференса
 run.py             альтернативная точка входа
+Dockerfile         образ; docker-compose.yml; deploy/ (systemd, инструкция)
 docs/cover.svg     обложка DotBioSite
 ```
 

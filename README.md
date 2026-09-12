@@ -100,14 +100,17 @@ doteye/
 ├── models.py      каталог YOLO-моделей с описаниями для панели
 ├── bot.py         aiogram 3: роутер, FSM-диалоги, админ-панель, уведомления
 ├── camera.py      источники кадров: вебка / RTSP / HTTP-MJPEG (фабрика)
-├── detector.py    детекция: yolo | yunet | motion (auto-деградация), remote-заглушка
+├── detector.py    детекция: yolo | yunet | motion (auto-деградация), remote
+├── remote.py      HTTP + AES-GCM транспорт и сервер remote-инференса
 ├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
 ├── crypto.py      AES-256-GCM для кадров, embeddings, remote-передачи
 ├── pipeline.py    цикл: камера -> детекция -> событие, пересборка, кулдаун
 └── storage.py     SQLite (thread-safe): people, events, settings
-tests/             pytest: crypto, storage, pipeline, detector, models, bot
+tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote
 bench.py           бенчмарк детектора: FPS и время инференса
+remote_server.py   точка входа для remote-инференса на сервере
 run.py             альтернативная точка входа
+Dockerfile         образ (bot/remote), docker-compose.yml, deploy/
 ```
 
 Поток данных:
@@ -158,6 +161,45 @@ python bench.py --backend yolo --model yolov8n.pt
 Печатает среднее время инференса, FPS и p95 на синтетических кадрах -
 помогает подобрать модель под железо.
 
+## Remote-инференс
+
+Камера и инференс могут жить на разных машинах: кадр шифруется AES-256-GCM
+и уходит POST-ом на сервер, оттуда возвращаются боксы. Полезно, когда камера
+на слабом устройстве, а модель тяжёлая.
+
+На сервере (с GPU или мощным CPU):
+
+```bash
+export DOTEYE_CRYPTO_KEY=<тот же ключ, что у клиента>
+python -m doteye.remote_server --host 0.0.0.0 --port 8099 \
+    --model yolov8n.pt --device cuda
+curl http://localhost:8099/health    # {"status": "ok"}
+```
+
+На машине с камерой в `.env`:
+
+```
+DOTEYE_REMOTE_PROCESSING=1
+DOTEYE_REMOTE_URL=http://<server-ip>:8099
+DOTEYE_CRYPTO_KEY=<тот же ключ>
+```
+
+Протокол: `POST /detect {"frame": "<base64(AES-GCM JPEG)>"}` -> `{"boxes": [[x1,y1,x2,y2], ...]}`,
+плюс `GET /health`. Если сервер недоступен, детектор возвращает пустой
+список и пайплайн не падает.
+
+## Деплой
+
+- `Dockerfile` - образ для бота и remote-сервера (Python 3.12 slim + OpenCV/ffmpeg, непривилегированный пользователь).
+- `docker-compose.yml` - сервис `doteye` (камера + инференс) и `remote` (профиль `remote`).
+- `deploy/doteye.service` - unit для systemd.
+- `deploy/README.md` - пошагово: Compose, systemd, Raspberry Pi (ARM).
+
+```bash
+cp .env.example .env && python -m doteye.crypto
+docker compose up -d --build doteye
+```
+
 ## План работ
 
 MVP собран и работает. Дальше по порядку:
@@ -168,11 +210,11 @@ MVP собран и работает. Дальше по порядку:
 - [x] **Выбор YOLO-модели** - каталог `models.py` с описанием мощности; смена модели пересобирает детектор на ходу.
 - [x] **Identity mode** - insightface `buffalo_l` за опциональной зависимостью, регистрация по фото (`/add`) и хранение embeddings.
 - [x] **Просмотр событий** - `/events` расшифровывает кадры и отправляет фото.
-- [x] **Тесты** - pytest: crypto, storage, pipeline, detector, models, bot.
+- [x] **Тесты** - pytest: crypto, storage, pipeline, detector, models, bot, remote.
 - [x] **Бенчмарк** - `bench.py` меряет FPS и время инференса.
 - [x] **Дедупликация** - кулдаун считается отдельно на каждого (имя в identity, иначе `unknown`), известный не блокирует событие другого.
-- [ ] **Remote-инференс** - `RemoteDetector.detect` бросает `NotImplementedError`; реализовать HTTP-транспорт поверх `Crypto`.
-- [ ] **Деплой** - Dockerfile для слабого железа (Raspberry Pi) + systemd.
+- [x] **Remote-инференс** - HTTP-транспорт поверх AES-GCM (`remote.py`), сервер `remote_server.py`.
+- [x] **Деплой** - Dockerfile + docker-compose, systemd-unit, инструкция для ARM.
 
 ## Лицензия
 
