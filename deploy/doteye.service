@@ -1,0 +1,29 @@
+[Unit]
+Description=DotEye - Telegram bot for room presence detection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=doteye
+Group=doteye
+WorkingDirectory=/opt/doteye
+
+# Секреты и настройки - в /opt/doteye/.env (не коммитить).
+EnvironmentFile=/opt/doteye/.env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/doteye/.venv/bin/python -m doteye.main
+
+Restart=on-failure
+RestartSec=5
+
+# Минимальные права: своя папка, без повышения привилегий.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/doteye/data
+
+[Install]
+WantedBy=multi-user.target

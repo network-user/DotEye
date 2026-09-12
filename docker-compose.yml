@@ -1,0 +1,45 @@
+# DotEye - docker-compose.
+#
+# Два сценария:
+#   1) Всё на одной машине (камера + инференс):  docker compose up doteye
+#   2) Инференс на сервере с GPU:               docker compose --profile remote up remote
+#      а на машине с камерой в .env:
+#        DOTEYE_REMOTE_PROCESSING=1
+#        DOTEYE_REMOTE_URL=http://<server-ip>:8099
+#
+# .env и data/ монтируются, чтобы секреты и БД не попадали в образ.
+
+services:
+  doteye:
+    build: .
+    image: doteye:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    # Доступ к вебкамере хоста (Linux). На Windows/macOS нужен V4L2-проброс
+    # или внешняя камера по RTSP - тогда devices не нужен.
+    devices:
+      - /dev/video0:/dev/video0
+    # Для GPU раскомментируй (нужен nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  remote:
+    build: .
+    image: doteye:latest
+    profiles: ["remote"]
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "doteye.remote_server", "--host", "0.0.0.0", "--port", "8099"]
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./data:/app/data
+    # Для ARM (Raspberry Pi) раскомментируй:
+    # platform: linux/arm64

@@ -1,0 +1,23 @@
+# DotEye - что не попадает в Docker-образ
+.git
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/
+.env
+.env.*
+!.env.example
+tests/
+docs/
+.idea/
+.vscode/
+.grok/
+*.pt
+*.onnx
+*.db
+*.sqlite3
