@@ -73,7 +73,7 @@ async def main() -> None:
         detector = build_detector(
             runtime.detector_backend, runtime.model_path, settings.device,
             runtime.min_confidence, settings.remote_processing, settings.remote_url,
-            settings.face_model,
+            settings.face_model, crypto,
         )
         pipeline = Pipeline(camera, detector, recognizer, storage, crypto, runtime)
         pipeline.poll_interval = settings.detection_interval

@@ -16,9 +16,13 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from doteye.crypto import Crypto
 
 CLASS_PERSON = 0
 
@@ -130,16 +134,30 @@ class MotionDetector(Detector):
 
 
 class RemoteDetector(Detector):
-    """Передаёт кадры на отдельный сервер обработки (config в плане работ).
+    """Передаёт кадры на отдельный сервер обработки (см. remote.py).
 
-    TODO(plan): реализовать транспорт (HTTP) поверх Crypto (AES-256-GCM).
+    Кадр шифруется AES-256-GCM и уходит POST-ом; сервер возвращает боксы.
+    Если сервер недоступен или ключа нет, детектор возвращает пустой список,
+    не роняя пайплайн.
     """
 
-    def __init__(self, remote_url: str) -> None:
+    def __init__(self, remote_url: str, crypto: "Crypto | None" = None,
+                 timeout: float = 10.0) -> None:
+        from doteye.remote import RemoteClient
+
         self._url = remote_url
+        self._crypto = crypto
+        self._client = RemoteClient(remote_url, crypto, timeout) if crypto else None
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
-        raise NotImplementedError("Remote detector: транспорт в плане работ")
+        if self._client is None:
+            print("[detector] remote: DOTEYE_CRYPTO_KEY не задан, кадр не отправлен")
+            return []
+        try:
+            return self._client.detect(frame)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[detector] remote недоступен: {exc}")
+            return []
 
     def close(self) -> None:
         pass
@@ -154,13 +172,14 @@ def yolo_available() -> bool:
 
 
 def build_detector(kind: str, model_path: str, device: str, min_conf: float,
-                   remote: bool, remote_url: str, face_model: str = "") -> Detector:
+                   remote: bool, remote_url: str, face_model: str = "",
+                   crypto: "Crypto | None" = None) -> Detector:
     """Собрать детектор. kind: auto | yolo | yunet | motion.
 
     remote перекрывает всё. auto идёт по цепочке yolo -> yunet -> motion.
     """
     if remote:
-        return RemoteDetector(remote_url)
+        return RemoteDetector(remote_url, crypto)
 
     kind = (kind or "auto").lower()
 

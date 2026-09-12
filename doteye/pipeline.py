@@ -112,7 +112,7 @@ class Pipeline:
         self._detector = build_detector(
             backend, model_path, device,
             min_conf, self._runtime.remote_processing,
-            self._runtime.remote_url, self._runtime.face_model,
+            self._runtime.remote_url, self._runtime.face_model, self._crypto,
         )
         self._detector_backend = backend
         self._model_path = model_path
