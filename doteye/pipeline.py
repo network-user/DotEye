@@ -1,130 +1,203 @@
-"""Пайплайн обработки: камера -> детекция -> (опц. распознавание) -> событие.
+"""Пайплайн: камера -> детекция -> трек вход/выход -> (опц. лицо) -> событие.
 
-Собирает CameraSource + Detector + Recognizer + Storage в цикл.
-Компоненты пересобираются на ходу, если из чата поменяли источник камеры
-или бэкенд детектора (см. runtime.py). Отвечает за троттлинг
-(detection_interval) и кулдаун событий (cooldown_seconds).
+Компоненты пересобираются на ходу. Событие только когда человек появился
+или исчез, а не на каждый кадр с боксом. Кулдаун гасит дребезг повторного
+входа. Кадр для превью берётся из кэша, без второго read() камеры.
 """
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 
-import cv2
 import numpy as np
 
-from doteye.camera import CameraSource, build_camera
+from doteye.annotate import annotate, crop_box, encode_jpeg
+from doteye.camera import CameraSource, build_cameras, parse_sources
 from doteye.crypto import Crypto
-from doteye.detector import Detector, build_detector
-from doteye.recognizer import Recognizer
+from doteye.detector import Detector, MotionGate, build_detector
+from doteye.recognizer import Recognizer, build_recognizer
 from doteye.runtime import Runtime
 from doteye.storage import Storage
+from doteye.tracker import Box, IoUTracker, Track
+from doteye.zones import filter_boxes, parse_zones
 
 
 class DetectionEvent:
-    """Результат одного срабатывания.
-
-    jpeg - готовое изображение (JPEG) для отправки в Telegram,
-    сохраняется в Storage зашифрованным.
-    """
+    """Одно срабатывание: вход, выход или служебный алерт."""
 
     def __init__(
         self,
         person_name: str | None,
         confidence: float,
-        jpeg: bytes,
+        jpeg: bytes | None,
         detected_at: float,
+        event_id: int | None = None,
+        event_type: str = "enter",
+        camera_source: str = "",
+        zone: str | None = None,
+        caption: str | None = None,
     ) -> None:
         self.person_name = person_name
         self.confidence = confidence
         self.jpeg = jpeg
         self.detected_at = detected_at
+        self.event_id = event_id
+        self.event_type = event_type
+        self.camera_source = camera_source
+        self.zone = zone
+        self.caption = caption
 
 
 class Pipeline:
     def __init__(
         self,
-        camera: CameraSource,
+        camera: CameraSource | list[tuple[str, CameraSource]],
         detector: Detector,
         recognizer: Recognizer | None,
         storage: Storage,
         crypto: Crypto,
         runtime: Runtime,
     ) -> None:
-        self._camera = camera
+        if isinstance(camera, list):
+            self._cameras: list[tuple[str, CameraSource]] = camera
+        else:
+            label = parse_sources(runtime.camera_source)[0]
+            self._cameras = [(label, camera)]
         self._detector = detector
         self._recognizer = recognizer
         self._storage = storage
         self._crypto = crypto
         self._runtime = runtime
-        self._last_event_ts = 0.0
-        # кулдаун отдельно на каждого (имя | "unknown"), а не на всю сцену
         self._last_seen: dict[str, float] = {}
         self._running = False
-        # пауза между итерациями фонового цикла (main задаёт из Settings)
-        self.poll_interval: float = 0.1
-        # ключи компонентов, чтобы понимать, когда нужна пересборка
         self._camera_source = str(runtime.camera_source)
         self._detector_backend = runtime.detector_backend
         self._model_path = runtime.model_path
         self._min_confidence = runtime.min_confidence
         self._device = runtime.device
+        self._imgsz = runtime.imgsz
+        self._remote = runtime.remote_processing
+        self._remote_url = runtime.remote_url
+        self._mode_seen = runtime.detect_mode
+        self._recognizer_device = runtime.device
+        self._recognizer_tried = recognizer is not None
+        self._trackers: dict[str, IoUTracker] = {}
+        self._gates: dict[str, MotionGate] = {}
+        self._lock = threading.Lock()
+        self._preview_frame: np.ndarray | None = None
+        self._preview_items: list[tuple[Box, str, tuple[int, int, int]]] = []
+        self._steps = 0
+        self._remote_down = False
+        self._poll_override: float | None = None
+        self.use_motion_gate = True
 
     def start(self) -> None:
         self._running = True
+        cams = ",".join(name for name, _ in self._cameras)
         print(
-            f"[pipeline] started (camera={self._camera_source}, "
+            f"[pipeline] started (camera={cams}, "
             f"detector={self._detector.backend}, model={self._model_path}, "
             f"device={self._device}, mode={self._runtime.detect_mode})"
         )
 
     def stop(self) -> None:
         self._running = False
-        self._camera.close()
+        for _, cam in self._cameras:
+            cam.close()
         self._detector.close()
         print("[pipeline] stopped")
+
+    @property
+    def poll_interval(self) -> float:
+        if self._poll_override is not None:
+            return self._poll_override
+        return max(0.05, self._runtime.detection_interval)
+
+    @poll_interval.setter
+    def poll_interval(self, value: float) -> None:
+        self._poll_override = float(value)
 
     def _maybe_rebuild_camera(self) -> None:
         source = str(self._runtime.camera_source)
         if source == self._camera_source:
             return
         print(f"[pipeline] camera -> {source}")
-        old = self._camera
-        self._camera = build_camera(source)
+        old = self._cameras
+        self._cameras = build_cameras(source)
         self._camera_source = source
-        old.close()
+        self._trackers.clear()
+        self._gates.clear()
+        for _, cam in old:
+            cam.close()
 
     def _maybe_rebuild_detector(self) -> None:
         backend = self._runtime.detector_backend
         model_path = self._runtime.model_path
         min_conf = self._runtime.min_confidence
         device = self._runtime.device
-        if (backend == self._detector_backend
-                and model_path == self._model_path
-                and min_conf == self._min_confidence
-                and device == self._device):
+        imgsz = self._runtime.imgsz
+        remote = self._runtime.remote_processing
+        remote_url = self._runtime.remote_url
+        if (
+            backend == self._detector_backend
+            and model_path == self._model_path
+            and min_conf == self._min_confidence
+            and device == self._device
+            and imgsz == self._imgsz
+            and remote == self._remote
+            and remote_url == self._remote_url
+        ):
             return
         print(
             f"[pipeline] detector -> {backend}, model -> {model_path}, "
-            f"device -> {device}"
+            f"device -> {device}, remote -> {remote}"
         )
         old = self._detector
         self._detector = build_detector(
-            backend, model_path, device,
-            min_conf, self._runtime.remote_processing,
-            self._runtime.remote_url, self._runtime.face_model, self._crypto,
+            backend, model_path, device, min_conf, remote, remote_url,
+            self._runtime.face_model, self._crypto,
+            imgsz=imgsz,
+            remote_fallback=self._runtime.remote_fallback,
+            remote_insecure=self._runtime.remote_insecure,
         )
         self._detector_backend = backend
         self._model_path = model_path
         self._min_confidence = min_conf
         self._device = device
+        self._imgsz = imgsz
+        self._remote = remote
+        self._remote_url = remote_url
         old.close()
 
-    def _identify(self, frame: np.ndarray) -> tuple[str | None, float]:
-        """Сравнить лицо в кадре с зарегистрированными embeddings."""
+    def _maybe_rebuild_recognizer(self) -> None:
+        mode = self._runtime.detect_mode
+        device = self._runtime.device
+        if mode != "identity":
+            self._mode_seen = mode
+            return
+        missing = self._recognizer is None or not self._recognizer.available()
+        switched = self._mode_seen != "identity"
+        device_changed = device != self._recognizer_device
+        if missing and (switched or not self._recognizer_tried):
+            self._recognizer = build_recognizer(device)
+            self._recognizer_tried = True
+            self._recognizer_device = device
+        elif device_changed and not missing:
+            rebuilt = build_recognizer(device)
+            if rebuilt.available():
+                self._recognizer = rebuilt
+            self._recognizer_device = device
+        self._mode_seen = mode
+
+    def _identify_crop(self, frame: np.ndarray, box: Box) -> tuple[str | None, float]:
         if self._recognizer is None or not self._recognizer.available():
             return None, 0.0
-        probe = self._recognizer.embed(frame)
+        crop = crop_box(frame, box)
+        if crop is None:
+            return None, 0.0
+        probe = self._recognizer.embed(crop)
         if probe is None:
             return None, 0.0
 
@@ -132,82 +205,242 @@ class Pipeline:
         best_distance = float("inf")
         threshold = self._runtime.face_threshold
         for row in self._storage.list_people_with_embeddings():
-            stored = row["embedding"]
-            if not stored:
-                continue
-            try:
-                plain = self._crypto.decrypt(stored)
-            except Exception:
-                continue
-            distance = self._recognizer.distance(probe, plain)
-            if distance < best_distance:
-                best_distance = distance
-                best_name = row["name"]
+            for stored in row["embeddings"]:
+                if not stored:
+                    continue
+                try:
+                    plain = self._crypto.decrypt(stored)
+                except Exception:
+                    continue
+                distance = self._recognizer.distance(probe, plain)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_name = row["name"]
 
         if best_name is not None and best_distance <= threshold:
-            confidence = max(0.0, 1.0 - best_distance)
-            return best_name, confidence
+            return best_name, max(0.0, 1.0 - best_distance)
         return None, 0.0
 
-    def step(self) -> DetectionEvent | None:
-        """Один прогон. Возвращает событие, если есть человек и пройден кулдаун.
+    def _tracker(self, source: str) -> IoUTracker:
+        tr = self._trackers.get(source)
+        if tr is None:
+            tr = IoUTracker(max_misses=self._runtime.track_max_misses)
+            self._trackers[source] = tr
+        else:
+            tr.max_misses = self._runtime.track_max_misses
+        return tr
 
-        Кулдаун считается отдельно для каждого человека (имя в identity mode,
-        иначе "unknown"), поэтому известный может не спамить, пока другой
-        заходит - его событие всё равно пройдёт.
-        """
+    def _gate(self, source: str) -> MotionGate:
+        gate = self._gates.get(source)
+        if gate is None:
+            gate = MotionGate()
+            self._gates[source] = gate
+        return gate
+
+    def _should_store(self) -> bool:
+        return self._runtime.armed
+
+    def _cooldown_ok(self, key: str, now: float) -> bool:
+        return now - self._last_seen.get(key, 0.0) >= self._runtime.cooldown_seconds
+
+    def _track_key(self, source: str, track: Track, event_type: str) -> str:
+        if track.person_name:
+            who = track.person_name
+        else:
+            cx = (track.box[0] + track.box[2]) // 8
+            cy = (track.box[1] + track.box[3]) // 8
+            who = f"u{cx}_{cy}"
+        return f"{source}:{who}:{event_type}"
+
+    def _emit(
+        self,
+        frame: np.ndarray,
+        track: Track,
+        event_type: str,
+        source: str,
+        now: float,
+    ) -> DetectionEvent | None:
+        who = track.person_name or "неизвестный"
+        verb = "вошёл" if event_type == "enter" else "вышел"
+        conf = f" ({track.confidence:.2f})" if track.confidence else ""
+        zone = f", зона {track.zone}" if track.zone else ""
+        label = f"{track.person_name or '?'}{conf}".strip()
+        color = (40, 200, 80) if track.person_name else (40, 40, 220)
+        if event_type == "exit":
+            color = (160, 160, 160)
+        vis = annotate(frame, [(track.box, label, color)])
+        jpeg = encode_jpeg(vis, self._runtime.jpeg_quality)
+        original = encode_jpeg(frame, self._runtime.jpeg_quality)
+        if jpeg is None or original is None:
+            return None
+        boxes_json = json.dumps([{
+            "x1": track.box[0], "y1": track.box[1],
+            "x2": track.box[2], "y2": track.box[3],
+            "name": track.person_name, "confidence": track.confidence,
+        }])
+        person_id = None
+        if track.person_name is not None:
+            row = self._storage.get_person(track.person_name)
+            person_id = int(row["id"]) if row else None
+        encrypted = self._crypto.encrypt(original)
+        event_id = self._storage.add_event(
+            person_id, encrypted, track.confidence,
+            event_type=event_type, boxes=boxes_json,
+            camera_source=source, zone=track.zone,
+        )
+        caption = f"DotEye: {verb} {who}{conf}\nкамера {source}{zone}"
+        return DetectionEvent(
+            track.person_name, track.confidence, jpeg, now,
+            event_id=event_id, event_type=event_type,
+            camera_source=source, zone=track.zone, caption=caption,
+        )
+
+    def _collect_alerts(self) -> list[DetectionEvent]:
+        err = getattr(self._detector, "last_error", None)
+        using = bool(getattr(self._detector, "using_fallback", False))
+        out: list[DetectionEvent] = []
+        now = time.time()
+        if err:
+            if not self._remote_down:
+                self._remote_down = True
+                extra = " Локальный fallback." if using else ""
+                out.append(DetectionEvent(
+                    None, 0.0, None, now, event_type="alert",
+                    caption=f"DotEye: remote недоступен ({err}).{extra}",
+                ))
+        elif self._remote_down:
+            self._remote_down = False
+            out.append(DetectionEvent(
+                None, 0.0, None, now, event_type="alert",
+                caption="DotEye: remote снова доступен.",
+            ))
+        return out
+
+    def step(self) -> list[DetectionEvent]:
+        """Один прогон по всем камерам. События входа/выхода."""
         self._maybe_rebuild_camera()
         self._maybe_rebuild_detector()
+        self._maybe_rebuild_recognizer()
 
-        frame = self._camera.read()
-        if frame is None:
-            return None
-
-        boxes = self._detector.detect(frame)
-        if not boxes:
-            return None
-
-        person_name: str | None = None
-        confidence = 0.0
-        if self._runtime.detect_mode == "identity":
-            person_name, confidence = self._identify(frame)
-
+        events: list[DetectionEvent] = []
+        events.extend(self._collect_alerts())
         now = time.time()
-        key = person_name or "unknown"
-        if now - self._last_seen.get(key, 0.0) < self._runtime.cooldown_seconds:
-            return None
+        identity = self._runtime.detect_mode == "identity"
+        zones = parse_zones(self._runtime.zones_json)
+        skip_yolo = self._detector.backend == "motion"
 
-        ok, buf = cv2.imencode(
-            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self._runtime.jpeg_quality]
-        )
-        if not ok:
-            return None
-        jpeg = buf.tobytes()
-        encrypted = self._crypto.encrypt(jpeg)
+        for source, camera in self._cameras:
+            frame = camera.read()
+            if frame is None:
+                continue
 
-        person_id = None
-        if person_name is not None:
-            row = self._storage.get_person(person_name)
-            person_id = row["id"] if row else None
-        self._storage.add_event(person_id, encrypted, confidence)
+            tracker = self._tracker(source)
+            run_det = True
+            if self.use_motion_gate and not skip_yolo and tracker.active_count == 0:
+                if not self._gate(source).moved(frame):
+                    run_det = False
+            raw_boxes = self._detector.detect(frame) if run_det else []
+            tagged = filter_boxes(raw_boxes, zones, frame.shape)
+            boxes = [box for box, _ in tagged]
+            zone_by_box = {box: zone for box, zone in tagged}
 
-        self._last_seen[key] = now
-        self._last_event_ts = now
-        return DetectionEvent(person_name, confidence, jpeg, now)
+            update = tracker.update(boxes)
+            preview_items: list[tuple[Box, str, tuple[int, int, int]]] = []
+            entered_ids = {t.id for t in update.entered}
+
+            for track in update.entered:
+                track.zone = zone_by_box.get(track.box)
+                if identity:
+                    name, conf = self._identify_crop(frame, track.box)
+                    track.person_name = name
+                    track.confidence = conf
+                    track.identified = name is not None
+                key = self._track_key(source, track, "enter")
+                preview_items.append((
+                    track.box,
+                    f"{track.person_name or '?'} {track.confidence:.2f}".strip(),
+                    (40, 200, 80) if track.person_name else (40, 40, 220),
+                ))
+                if not self._should_store():
+                    continue
+                if not self._cooldown_ok(key, now):
+                    continue
+                self._last_seen[key] = now
+                event = self._emit(frame, track, "enter", source, now)
+                if event is not None and self._runtime.should_notify():
+                    events.append(event)
+
+            for track in update.active:
+                if track.id in entered_ids:
+                    continue
+                if identity and not track.identified:
+                    name, conf = self._identify_crop(frame, track.box)
+                    if name is not None:
+                        track.person_name = name
+                        track.confidence = conf
+                        track.identified = True
+                track.zone = zone_by_box.get(track.box, track.zone)
+                preview_items.append((
+                    track.box,
+                    f"{track.person_name or '?'} {track.confidence:.2f}".strip(),
+                    (40, 200, 80) if track.person_name else (40, 40, 220),
+                ))
+
+            for track in update.exited:
+                key = self._track_key(source, track, "exit")
+                if not self._should_store() or not self._runtime.notify_exit:
+                    continue
+                if not self._cooldown_ok(key, now):
+                    continue
+                self._last_seen[key] = now
+                event = self._emit(frame, track, "exit", source, now)
+                if event is not None and self._runtime.should_notify():
+                    events.append(event)
+
+            with self._lock:
+                self._preview_frame = frame
+                self._preview_items = preview_items
+
+        self._steps += 1
+        if self._steps % 25 == 0:
+            self._storage.prune_events(
+                self._runtime.events_max, self._runtime.events_ttl_days,
+            )
+        return events
 
     @property
     def running(self) -> bool:
         return self._running
 
     def snapshot(self) -> bytes | None:
-        """Текущий кадр камеры как JPEG (для превью в админ-панели).
-
-        Вызывать из потока пайплайна, чтобы не читать камеру параллельно.
-        """
-        frame = self._camera.read()
+        """Кэш последнего кадра. Не читает камеру (нет гонки с циклом)."""
+        with self._lock:
+            frame = self._preview_frame
+            items = list(self._preview_items)
         if frame is None:
             return None
-        ok, buf = cv2.imencode(
-            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self._runtime.jpeg_quality]
-        )
-        return buf.tobytes() if ok else None
+        vis = annotate(frame, items) if items else frame
+        return encode_jpeg(vis, self._runtime.jpeg_quality)
+
+    def health_text(self) -> str:
+        lines = [
+            f"Пайплайн: {'on' if self._running else 'off'}",
+            f"Детектор факт: {self._detector.backend}",
+        ]
+        err = getattr(self._detector, "last_error", None)
+        if err:
+            lines.append(f"Remote ошибка: {err}")
+        if getattr(self._detector, "using_fallback", False):
+            lines.append("Remote: fallback")
+        for name, cam in self._cameras:
+            ok = getattr(cam, "healthy", True)
+            cerr = getattr(cam, "last_error", None)
+            rec = getattr(cam, "reconnects", 0)
+            mark = "ok" if ok else "fail"
+            extra = f", {cerr}" if cerr else ""
+            rec_s = f", reconnects={rec}" if rec else ""
+            lines.append(f"Камера {name}: {mark}{extra}{rec_s}")
+        tracks = sum(t.active_count for t in self._trackers.values())
+        lines.append(f"Треков: {tracks}")
+        lines.append(f"Событий в БД: {self._storage.count_events()}")
+        return "\n".join(lines)

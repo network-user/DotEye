@@ -18,7 +18,7 @@ import asyncio
 from contextlib import suppress
 
 from doteye.bot import notify_startup, run_bot, send_notifications
-from doteye.camera import build_camera
+from doteye.camera import build_cameras
 from doteye.config import get_settings
 from doteye.crypto import Crypto
 from doteye.detector import build_detector
@@ -28,21 +28,38 @@ from doteye.runtime import Runtime
 from doteye.storage import Storage
 
 
+def _enqueue(events: asyncio.Queue[DetectionEvent], event: DetectionEvent) -> None:
+    """Положить событие; при переполнении вытеснить самое старое."""
+    try:
+        events.put_nowait(event)
+        return
+    except asyncio.QueueFull:
+        pass
+    try:
+        events.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+    try:
+        events.put_nowait(event)
+    except asyncio.QueueFull:
+        print("[queue] drop")
+
+
 async def _pipeline_loop(
-    pipeline: Pipeline, events: asyncio.Queue[DetectionEvent], loop: asyncio.AbstractEventLoop
+    pipeline: Pipeline, events: asyncio.Queue[DetectionEvent]
 ) -> None:
     """Фоновый цикл: гоняет step() и складывает события в очередь."""
     while True:
         try:
-            event = await asyncio.to_thread(pipeline.step)
+            batch = await asyncio.to_thread(pipeline.step)
         except Exception as exc:  # noqa: BLE001
             print(f"[pipeline] ошибка шага: {exc}")
             await asyncio.sleep(1.0)
             continue
-        if event is not None:
-            who = event.person_name or "unknown"
-            print(f"[event] {who} ({event.confidence:.2f})")
-            loop.call_soon_threadsafe(events.put_nowait, event)
+        for event in batch:
+            who = event.person_name or event.event_type
+            print(f"[event] {event.event_type} {who} ({event.confidence:.2f})")
+            _enqueue(events, event)
         await asyncio.sleep(pipeline.poll_interval)
 
 
@@ -62,21 +79,22 @@ async def main() -> None:
         print("[config] Пайплайн и кадры выключены до заполнения ключа.")
         crypto = None
 
-    recognizer = build_recognizer() if runtime.detect_mode == "identity" else None
+    recognizer = build_recognizer(runtime.device)
 
-    loop = asyncio.get_running_loop()
     events: asyncio.Queue[DetectionEvent] = asyncio.Queue(maxsize=32)
 
     pipeline = None
     if crypto is not None:
-        camera = build_camera(runtime.camera_source)
+        cameras = build_cameras(runtime.camera_source)
         detector = build_detector(
-            runtime.detector_backend, runtime.model_path, settings.device,
-            runtime.min_confidence, settings.remote_processing, settings.remote_url,
+            runtime.detector_backend, runtime.model_path, runtime.device,
+            runtime.min_confidence, runtime.remote_processing, runtime.remote_url,
             settings.face_model, crypto,
+            imgsz=runtime.imgsz,
+            remote_fallback=runtime.remote_fallback,
+            remote_insecure=runtime.remote_insecure,
         )
-        pipeline = Pipeline(camera, detector, recognizer, storage, crypto, runtime)
-        pipeline.poll_interval = settings.detection_interval
+        pipeline = Pipeline(cameras, detector, recognizer, storage, crypto, runtime)
         pipeline.start()
 
     tasks = [
@@ -87,7 +105,7 @@ async def main() -> None:
     if settings.has_admins:
         tasks.append(asyncio.create_task(send_notifications(settings, events)))
     if pipeline is not None:
-        tasks.append(asyncio.create_task(_pipeline_loop(pipeline, events, loop)))
+        tasks.append(asyncio.create_task(_pipeline_loop(pipeline, events)))
 
     await notify_startup(settings, runtime, recognizer, pipeline)
 
