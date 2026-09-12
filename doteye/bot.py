@@ -1,11 +1,13 @@
 """Telegram-бот на aiogram 3.
 
 Команды настройки целиком внутри чата:
+  /panel      - админ-панель на inline-кнопках
   /start      - приветствие
   /status     - текущие настройки
   /mode       - переключить presence | identity (детекция | распознавание лиц)
   /camera     - задать источник (0 = вебка, rtsp/http адрес)
-  /detector   - бэкенд детектора: auto | yolo | hog
+  /detector   - бэкенд детектора: auto | yolo | yunet | motion
+  /model      - выбрать YOLO-модель (с описанием мощности)
   /confidence - минимальная уверенность детекции
   /cooldown   - пауза между уведомлениями, сек
   /people     - список известных людей
@@ -14,8 +16,9 @@
   /events     - последние события с кадрами
   /help       - справка
 
-Все настройки хранятся в Storage; пайплайн читает их через runtime.py.
-Доступ - только для id из DOTEYE_ADMIN_IDS.
+Все настройки хранятся в Storage; пайплайн читает их через runtime.py
+и пересобирает камеру/детектор на ходу. Доступ - только для админов
+из DOTEYE_ADMIN_IDS.
 """
 
 from __future__ import annotations
@@ -28,20 +31,31 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BufferedInputFile, Message, TelegramObject
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    TelegramObject,
+)
 
+from doteye import models
 from doteye.config import Settings
 from doteye.crypto import Crypto
+from doteye.pipeline import Pipeline
 from doteye.recognizer import Recognizer
 from doteye.runtime import Runtime
 from doteye.storage import Storage
 
 HELP = (
     "DotEye - кто зашёл в комнату.\n\n"
+    "/panel - админ-панель (кнопки)\n"
     "/status - текущие настройки\n"
     "/mode - presence <-> identity\n"
     "/camera - источник кадров (0, rtsp://, http://)\n"
     "/detector - auto | yolo | yunet | motion\n"
+    "/model - выбрать YOLO-модель\n"
     "/confidence - порог детекции (0..1)\n"
     "/cooldown - пауза между уведомлениями, сек\n"
     "/people - известные люди\n"
@@ -76,16 +90,24 @@ def _is_admin(message: Message, settings: Settings) -> bool:
     return message.from_user is not None and message.from_user.id in settings.admin_ids
 
 
+def _is_admin_user(user_id: int | None, settings: Settings) -> bool:
+    if not settings.has_admins:
+        return True
+    return user_id is not None and user_id in settings.admin_ids
+
+
 class AccessMiddleware(BaseMiddleware):
     """Пускает дальше только админов и прокидывает зависимости в хендлеры."""
 
     def __init__(self, settings: Settings, storage: Storage, runtime: Runtime,
-                 crypto: Crypto | None, recognizer: Recognizer | None) -> None:
+                 crypto: Crypto | None, recognizer: Recognizer | None,
+                 pipeline: Pipeline | None) -> None:
         self._settings = settings
         self._storage = storage
         self._runtime = runtime
         self._crypto = crypto
         self._recognizer = recognizer
+        self._pipeline = pipeline
 
     async def __call__(
         self,
@@ -98,8 +120,15 @@ class AccessMiddleware(BaseMiddleware):
         data["runtime"] = self._runtime
         data["crypto"] = self._crypto
         data["recognizer"] = self._recognizer
+        data["pipeline"] = self._pipeline
+
         if isinstance(event, Message) and not _is_admin(event, self._settings):
             await event.answer("Нет доступа.")
+            return None
+        if isinstance(event, CallbackQuery) and not _is_admin_user(
+            event.from_user.id if event.from_user else None, self._settings
+        ):
+            await event.answer("Нет доступа.", show_alert=True)
             return None
         return await handler(event, data)
 
@@ -107,14 +136,87 @@ class AccessMiddleware(BaseMiddleware):
 router = Router()
 
 
+def _panel_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+    mode_next = "identity" if runtime.detect_mode == "presence" else "presence"
+    backend_next = "yolo" if runtime.detector_backend != "yolo" else "auto"
+    rows = [
+        [
+            InlineKeyboardButton(text="Статус", callback_data="panel:status"),
+            InlineKeyboardButton(
+                text=f"Режим: {runtime.detect_mode} -> {mode_next}",
+                callback_data="panel:mode",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Детектор: {runtime.detector_backend} -> {backend_next}",
+                callback_data="panel:detector",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text="YOLO-модель", callback_data="panel:model"),
+            InlineKeyboardButton(text="Различия моделей", callback_data="panel:model_help"),
+        ],
+        [
+            InlineKeyboardButton(text="Превью камеры", callback_data="panel:snapshot"),
+            InlineKeyboardButton(text="Люди", callback_data="panel:people"),
+        ],
+        [
+            InlineKeyboardButton(text="События", callback_data="panel:events"),
+            InlineKeyboardButton(text="Справка", callback_data="panel:help"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _model_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for name, info in models.YOLO_MODELS.items():
+        mark = " [текущая]" if name == runtime.model_path else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{info.title}{mark}", callback_data=f"model:set:{name}"
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="panel:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _status_text(runtime: Runtime, recognizer: Recognizer | None,
+                 pipeline: Pipeline | None) -> str:
+    face = "on" if recognizer is not None and recognizer.available() else "off/dummy"
+    remote = "on" if runtime.remote_processing else "off"
+    running = "on" if pipeline is not None and pipeline.running else "off"
+    info = models.get_model(runtime.model_path)
+    model_title = info.title if info else runtime.model_path
+    return (
+        "Настройки DotEye:\n"
+        f"Пайплайн: {running}\n"
+        f"Режим: {runtime.detect_mode}\n"
+        f"Камера: {runtime.camera_source}\n"
+        f"Детектор: {runtime.detector_backend} (device={runtime.device})\n"
+        f"Модель: {model_title}\n"
+        f"Мин. уверенность: {runtime.min_confidence}\n"
+        f"Кулдаун: {runtime.cooldown_seconds} сек\n"
+        f"Порог лица: {runtime.face_threshold}\n"
+        f"Распознавание: {face}\n"
+        f"Remote: {remote}"
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, settings: Settings) -> None:
     admin = "админ" if _is_admin(message, settings) else "гость"
     await message.answer(
         f"DotEye на связи ({admin}).\n"
-        "Подключи камеру /camera, выбери режим /mode.\n"
+        "Управление - /panel. Подключи камеру, выбери режим.\n"
         "/help - все команды."
     )
+
+
+@router.message(Command("panel"))
+async def cmd_panel(message: Message, runtime: Runtime) -> None:
+    await message.answer("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
 
 
 @router.message(Command("help"))
@@ -123,20 +225,114 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("status"))
-async def cmd_status(message: Message, runtime: Runtime, recognizer: Recognizer | None) -> None:
-    face = "on" if recognizer is not None and recognizer.available() else "off/dummy"
-    remote = "on" if runtime.remote_processing else "off"
-    await message.answer(
-        "Настройки:\n"
-        f"Режим: {runtime.detect_mode}\n"
-        f"Камера: {runtime.camera_source}\n"
-        f"Детектор: {runtime.detector_backend} (device={runtime.device})\n"
-        f"Мин. уверенность: {runtime.min_confidence}\n"
-        f"Кулдаун: {runtime.cooldown_seconds} сек\n"
-        f"Порог лица: {runtime.face_threshold}\n"
-        f"Распознавание: {face}\n"
-        f"Remote: {remote}"
+async def cmd_status(message: Message, runtime: Runtime,
+                     recognizer: Recognizer | None, pipeline: Pipeline | None) -> None:
+    await message.answer(_status_text(runtime, recognizer, pipeline))
+
+
+@router.callback_query(F.data == "panel:open")
+async def cb_open(cq: CallbackQuery, runtime: Runtime) -> None:
+    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:status")
+async def cb_status(cq: CallbackQuery, runtime: Runtime,
+                    recognizer: Recognizer | None, pipeline: Pipeline | None) -> None:
+    await cq.message.answer(_status_text(runtime, recognizer, pipeline))
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:mode")
+async def cb_mode(cq: CallbackQuery, runtime: Runtime) -> None:
+    runtime.detect_mode = "identity" if runtime.detect_mode == "presence" else "presence"
+    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.answer(f"Режим: {runtime.detect_mode}")
+
+
+@router.callback_query(F.data == "panel:detector")
+async def cb_detector(cq: CallbackQuery, runtime: Runtime) -> None:
+    order = ["auto", "yolo", "yunet", "motion"]
+    idx = order.index(runtime.detector_backend) if runtime.detector_backend in order else 0
+    runtime.detector_backend = order[(idx + 1) % len(order)]
+    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.answer(f"Детектор: {runtime.detector_backend}")
+
+
+@router.callback_query(F.data == "panel:model")
+async def cb_model(cq: CallbackQuery, runtime: Runtime) -> None:
+    await cq.message.edit_text(
+        "Выбери YOLO-модель. Детектор пересоберётся на ходу:",
+        reply_markup=_model_keyboard(runtime),
     )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:model_help")
+async def cb_model_help(cq: CallbackQuery) -> None:
+    await cq.message.answer(models.comparison(), parse_mode="Markdown")
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("model:set:"))
+async def cb_model_set(cq: CallbackQuery, runtime: Runtime,
+                       pipeline: Pipeline | None) -> None:
+    name = cq.data.split(":", 2)[2]
+    info = models.get_model(name)
+    if info is None:
+        await cq.answer("Неизвестная модель", show_alert=True)
+        return
+    runtime.model_path = name
+    note = ""
+    if runtime.detector_backend != "yolo":
+        runtime.detector_backend = "yolo"
+        note = "\nДетектор переключён на yolo."
+    if pipeline is None:
+        note += "\nПайплайн выключен (нет ключа), модель применится при старте."
+    else:
+        note += "\nДетектор перезапустится на следующем кадре."
+    await cq.message.edit_text(
+        models.describe(name) + note, parse_mode="Markdown",
+        reply_markup=_model_keyboard(runtime),
+    )
+    await cq.answer(f"Выбрано: {info.title}")
+
+
+@router.callback_query(F.data == "panel:snapshot")
+async def cb_snapshot(cq: CallbackQuery, pipeline: Pipeline | None) -> None:
+    if pipeline is None:
+        await cq.answer("Пайплайн выключен", show_alert=True)
+        return
+    jpeg = await asyncio.to_thread(pipeline.snapshot)
+    if jpeg is None:
+        await cq.answer("Кадр недоступен", show_alert=True)
+        return
+    await cq.message.answer_photo(BufferedInputFile(jpeg, filename="snapshot.jpg"))
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:people")
+async def cb_people(cq: CallbackQuery, storage: Storage) -> None:
+    rows = storage.list_people()
+    if not rows:
+        await cq.message.answer("Список людей пуст.")
+    else:
+        lines = [f"[{'+' if r['has_face'] else '-'}] {r['name']}" for r in rows]
+        await cq.message.answer("Люди (+, если есть фото):\n" + "\n".join(lines))
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:events")
+async def cb_events(cq: CallbackQuery, storage: Storage,
+                    crypto: Crypto | None, runtime: Runtime) -> None:
+    await cq.answer()
+    await _send_events(cq.message, storage, crypto, runtime)
+
+
+@router.callback_query(F.data == "panel:help")
+async def cb_help(cq: CallbackQuery) -> None:
+    await cq.message.answer(HELP)
+    await cq.answer()
 
 
 @router.message(Command("mode"))
@@ -160,6 +356,33 @@ async def cmd_detector(message: Message, runtime: Runtime, command: Command) -> 
         return
     runtime.detector_backend = value
     await message.answer(f"Детектор: {value}")
+
+
+@router.message(Command("model"))
+async def cmd_model(message: Message, runtime: Runtime, command: Command) -> None:
+    value = (command.args or "").strip()
+    if not value:
+        await message.answer(
+            f"Текущая модель: {runtime.model_path}\n"
+            "Выбрать: /model <имя>, например /model yolov8s.pt\n\n"
+            + models.comparison(),
+            parse_mode="Markdown",
+        )
+        return
+    info = models.get_model(value)
+    if info is None:
+        await message.answer(
+            f"«{value}» нет в каталоге. Доступные: "
+            + ", ".join(models.YOLO_MODELS)
+        )
+        return
+    runtime.model_path = value
+    if runtime.detector_backend != "yolo":
+        runtime.detector_backend = "yolo"
+    await message.answer(
+        models.describe(value) + "\n\nДетектор пересоберётся на ходу.",
+        parse_mode="Markdown",
+    )
 
 
 @router.message(Command("people"))
@@ -302,8 +525,7 @@ async def proc_remove(message: Message, state: FSMContext, storage: Storage) -> 
     await state.clear()
 
 
-@router.message(Command("events"))
-async def cmd_events(
+async def _send_events(
     message: Message, storage: Storage, crypto: Crypto | None, runtime: Runtime
 ) -> None:
     if crypto is None:
@@ -330,6 +552,13 @@ async def cmd_events(
         )
 
 
+@router.message(Command("events"))
+async def cmd_events(
+    message: Message, storage: Storage, crypto: Crypto | None, runtime: Runtime
+) -> None:
+    await _send_events(message, storage, crypto, runtime)
+
+
 @router.message()
 async def fallback(message: Message) -> None:
     await message.answer("Не понял. /help - список команд.")
@@ -341,18 +570,39 @@ async def run_bot(
     runtime: Runtime,
     crypto: Crypto | None,
     recognizer: Recognizer | None,
+    pipeline: Pipeline | None,
 ) -> None:
     if not settings.has_token:
         raise RuntimeError("DOTEYE_BOT_TOKEN не задан")
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
-    di = AccessMiddleware(settings, storage, runtime, crypto, recognizer)
+    di = AccessMiddleware(settings, storage, runtime, crypto, recognizer, pipeline)
     dp.message.middleware(di)
+    dp.callback_query.middleware(di)
     dp.include_router(router)
 
     try:
         await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+
+async def notify_startup(
+    settings: Settings, runtime: Runtime, recognizer: Recognizer | None,
+    pipeline: Pipeline | None,
+) -> None:
+    """Сообщить админам, что бот запущен, и прислать текущие настройки."""
+    if not settings.has_admins:
+        return
+    bot = Bot(token=settings.bot_token)
+    text = "DotEye запущен.\n\n" + _status_text(runtime, recognizer, pipeline)
+    try:
+        for admin in settings.admin_ids:
+            try:
+                await bot.send_message(admin, text, reply_markup=_panel_keyboard(runtime))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[notify] admin {admin}: {exc}")
     finally:
         await bot.session.close()
 

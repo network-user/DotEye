@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from doteye.bot import run_bot, send_notifications
+from doteye.bot import notify_startup, run_bot, send_notifications
 from doteye.camera import build_camera
 from doteye.config import get_settings
 from doteye.crypto import Crypto
@@ -71,7 +71,7 @@ async def main() -> None:
     if crypto is not None:
         camera = build_camera(runtime.camera_source)
         detector = build_detector(
-            runtime.detector_backend, settings.model_path, settings.device,
+            runtime.detector_backend, runtime.model_path, settings.device,
             runtime.min_confidence, settings.remote_processing, settings.remote_url,
             settings.face_model,
         )
@@ -79,11 +79,17 @@ async def main() -> None:
         pipeline.poll_interval = settings.detection_interval
         pipeline.start()
 
-    tasks = [asyncio.create_task(run_bot(settings, storage, runtime, crypto, recognizer))]
+    tasks = [
+        asyncio.create_task(
+            run_bot(settings, storage, runtime, crypto, recognizer, pipeline)
+        )
+    ]
     if settings.has_admins:
         tasks.append(asyncio.create_task(send_notifications(settings, events)))
     if pipeline is not None:
         tasks.append(asyncio.create_task(_pipeline_loop(pipeline, events, loop)))
+
+    await notify_startup(settings, runtime, recognizer, pipeline)
 
     try:
         await asyncio.gather(*tasks)
