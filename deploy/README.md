@@ -21,6 +21,10 @@ docker compose logs -f doteye
 
 Вебка пробрасывается через `devices: /dev/video0`. Если камера внешняя по
 RTSP - убери блок `devices` и укажи `DOTEYE_CAMERA_SOURCE=rtsp://...`.
+Камера остаётся в LAN: RTSP/MJPEG и веб-морду в интернет не публикуй
+(см. отказ от ответственности в корневом README).
+Сирена и TTS в контейнере на Linux требуют `/dev/snd` хоста (строка в
+`docker-compose.yml` закомментирована).
 
 GPU (NVIDIA): раскомментируй `deploy.resources` в `docker-compose.yml`,
 поставь `nvidia-container-toolkit` и `DOTEYE_DEVICE=cuda`.

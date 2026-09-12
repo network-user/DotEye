@@ -31,7 +31,7 @@ python -m doteye.main
 | Установка (dev + тесты) | `pip install -r requirements-dev.txt` |
 | Запуск | `python -m doteye.main` |
 | Remote-сервер | `python -m doteye.remote_server --host 127.0.0.1 --port 8099` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/remote_server.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py remote_server.py run.py bench.py` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/remote_server.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py doteye/audio.py doteye/tts.py doteye/voice.py remote_server.py run.py bench.py` |
 | Тесты | `python -m pytest tests -q` |
 | Бенчмарк | `python bench.py` |
 | Docker | `docker compose up -d --build doteye` |
@@ -55,9 +55,12 @@ doteye/
 ├── tracker.py     IoU-трекер входа/выхода
 ├── zones.py       ROI кадра (0..1)
 ├── annotate.py    кроп бокса и рамки на JPEG
+├── audio.py       сирена WAV, плеер winsound/aplay/afplay
+├── tts.py         pyttsx3 / espeak-ng / dummy
+├── voice.py       тревога, фразы, ручная озвучка (отдельный поток)
 ├── pipeline.py    цикл камера -> трек enter/exit -> событие, кэш кадра, prune
 └── storage.py     SQLite WAL: people, embeddings, events, settings, notification outbox
-tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote, tracker, zones
+tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote, tracker, zones, audio, voice
 bench.py           бенчмарк детектора: FPS и время инференса
 remote_server.py   точка входа remote-сервера инференса
 run.py             альтернативная точка входа
@@ -71,7 +74,7 @@ docs/cover.svg     обложка DotBioSite
 - **Стиль кода:** следовать существующим файлам; type hints обязательны, `from __future__ import annotations`.
 - **Именование:** нижний регистр с подчёркиванием; ABC-слои с `<Layer>` + `build_<layer>()` фабриками.
 - **Хранение:** SQLite без ORM (stdlib `sqlite3`), схема в `storage.py`.
-- **Слои отделены:** камера / детектор / распознавание / пайплайн каждый в своём модуле, связаны интерфейсами ABC.
+- **Слои отделены:** камера / детектор / распознавание / пайплайн / голос каждый в своём модуле, связаны интерфейсами ABC.
 
 ## Переменные окружения
 
@@ -105,6 +108,24 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_REMOTE_FALLBACK` | `1` = локальный детектор при падении remote |
 | `DOTEYE_REMOTE_INSECURE` | `1` = не проверять TLS remote, только при `DOTEYE_ENV=development` |
 | `DOTEYE_CRYPTO_KEY` | base64 32 байта для AES-GCM |
+| `DOTEYE_VOICE` | `1` = авто-фразы (приветствие, тревога по событию) |
+| `DOTEYE_VOICE_ALARM` | `1` = тревога по незнакомцу |
+| `DOTEYE_VOICE_SIREN` | `1` = двухтональная сирена |
+| `DOTEYE_VOICE_SPEECH` | `1` = TTS |
+| `DOTEYE_VOICE_WELCOME` | `1` = «добро пожаловать, {name}» |
+| `DOTEYE_VOICE_GOODBYE` | `1` = прощание при выходе известного |
+| `DOTEYE_VOICE_PRESENCE` | `1` = фраза при любом входе в presence |
+| `DOTEYE_VOICE_ARMED_ANNOUNCE` | `1` = озвучивать вкл/выкл охраны |
+| `DOTEYE_VOICE_ALARM_ON_PRESENCE` | `1` = тревога на любой вход в presence |
+| `DOTEYE_VOICE_MUTE_QUIET` | `1` = глушить приветствия в тихие часы (сирена нет) |
+| `DOTEYE_VOICE_REPEAT_SECONDS` | период повтора фразы тревоги, сек |
+| `DOTEYE_VOICE_TIMEOUT_SECONDS` | автоснятие, сек (`0` = пока не снимут) |
+| `DOTEYE_VOICE_GRACE_SECONDS` | пауза после ухода незнакомца, сек |
+| `DOTEYE_VOICE_CLEAR_ON` | `both` \| `known` \| `exit` |
+| `DOTEYE_VOICE_VOLUME` | громкость 0..1 |
+| `DOTEYE_VOICE_RATE` | скорость речи 0.4..2.5 |
+| `DOTEYE_VOICE_TTS_VOICE` | id голоса TTS |
+| `DOTEYE_VOICE_COOLDOWN_SECONDS` | пауза повторного приветствия, сек |
 
 Не читай `.env`. Не коммить секреты.
 
@@ -112,7 +133,7 @@ docs/cover.svg     обложка DotBioSite
 
 - Перед правками прочитай затронутые файлы и соседний код.
 - После изменений запусти `python -m py_compile doteye/*.py run.py` и `python -m pytest tests -q`.
-- **README-sync:** при глобальных изменениях (новые/удалённые модули, зависимости, команды, смена архитектуры или runtime) обнови `README.md` через `generate-readme` и `AGENTS.md` через `sync-project-rules` - в том числе пересчёт LoC. Мелкие правки README не трогают.
+- **README-sync:** при глобальных изменениях (новые/удалённые модули, зависимости, команды, смена архитектуры или runtime) обнови `README.md` через `generate-readme` и `AGENTS.md` через `sync-project-rules` - в том числе пересчёт LoC. Мелкие правки README не трогают. Блок `<!-- disclaimer:start -->…<!-- disclaimer:end -->` в README - авторский: при регенерации перенеси дословно, как блок аудита.
 - Не латай разметку README вручную - перегенерируй скиллом.
 - Минимальный diff - не рефактори несвязанный код.
 - Числа, пути, версии - только из репозитория.
@@ -122,12 +143,14 @@ docs/cover.svg     обложка DotBioSite
 - Не выдумывать команды, зависимости, env, API endpoints.
 - Не менять `LICENSE` без явного запроса пользователя.
 - Не коммитить секреты, токены, `.env`.
-- Не удалять маркеры `<!-- loc:start -->` / `<!-- loc:end -->` в README.
+- Не удалять маркеры `<!-- loc:start -->` / `<!-- loc:end -->` и `<!-- disclaimer:start -->` / `<!-- disclaimer:end -->` в README.
 - Не логировать `DOTEYE_CRYPTO_KEY` и IV (в `crypto.py`).
+- Не писать «ставь в прод» и «стек свободный»: Ultralytics AGPL-3.0, веса InsightFace research-only; код репозитория All Rights Reserved.
+- Не рекомендовать `identity` в офисе, подъезде, на улице; не учить проброс RTSP/MJPEG камеры в WAN.
 
 ## Документация
 
-- [README.md](README.md) - запуск, команды бота, стек, архитектура, план работ
+- [README.md](README.md) - запуск, команды бота, стек, архитектура, отказ от ответственности, лицензия
 - [LICENSE](LICENSE) - All Rights Reserved
 
 ## DotCore
