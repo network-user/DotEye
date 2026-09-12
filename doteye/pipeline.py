@@ -64,12 +64,15 @@ class Pipeline:
         # ключи компонентов, чтобы понимать, когда нужна пересборка
         self._camera_source = str(runtime.camera_source)
         self._detector_backend = runtime.detector_backend
+        self._model_path = runtime.model_path
+        self._min_confidence = runtime.min_confidence
 
     def start(self) -> None:
         self._running = True
         print(
             f"[pipeline] started (camera={self._camera_source}, "
-            f"detector={self._detector.backend}, mode={self._runtime.detect_mode})"
+            f"detector={self._detector.backend}, model={self._model_path}, "
+            f"mode={self._runtime.detect_mode})"
         )
 
     def stop(self) -> None:
@@ -90,16 +93,22 @@ class Pipeline:
 
     def _maybe_rebuild_detector(self) -> None:
         backend = self._runtime.detector_backend
-        if backend == self._detector_backend:
+        model_path = self._runtime.model_path
+        min_conf = self._runtime.min_confidence
+        if (backend == self._detector_backend
+                and model_path == self._model_path
+                and min_conf == self._min_confidence):
             return
-        print(f"[pipeline] detector -> {backend}")
+        print(f"[pipeline] detector -> {backend}, model -> {model_path}")
         old = self._detector
         self._detector = build_detector(
-            backend, self._runtime.model_path, self._runtime.device,
-            self._runtime.min_confidence, self._runtime.remote_processing,
+            backend, model_path, self._runtime.device,
+            min_conf, self._runtime.remote_processing,
             self._runtime.remote_url, self._runtime.face_model,
         )
         self._detector_backend = backend
+        self._model_path = model_path
+        self._min_confidence = min_conf
         old.close()
 
     def _identify(self, frame: np.ndarray) -> tuple[str | None, float]:
@@ -169,3 +178,20 @@ class Pipeline:
 
         self._last_event_ts = now
         return DetectionEvent(person_name, confidence, jpeg, now)
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def snapshot(self) -> bytes | None:
+        """Текущий кадр камеры как JPEG (для превью в админ-панели).
+
+        Вызывать из потока пайплайна, чтобы не читать камеру параллельно.
+        """
+        frame = self._camera.read()
+        if frame is None:
+            return None
+        ok, buf = cv2.imencode(
+            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self._runtime.jpeg_quality]
+        )
+        return buf.tobytes() if ok else None

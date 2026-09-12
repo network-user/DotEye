@@ -89,11 +89,15 @@ class Runtime:
     def face_threshold(self, value: float) -> None:
         self._storage.set("face_threshold", str(value))
 
-    # -- только из env (не меняются на ходу) ---------------------------
-
     @property
     def model_path(self) -> str:
-        return self._settings.model_path
+        return self._get_str("model_path", self._settings.model_path)
+
+    @model_path.setter
+    def model_path(self, value: str) -> None:
+        self._storage.set("model_path", value)
+
+    # -- только из env (не меняются на ходу) ---------------------------
 
     @property
     def device(self) -> str:
