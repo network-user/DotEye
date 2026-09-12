@@ -1,0 +1,201 @@
+"""Тесты бота: клавиатуры, статус, callback-хендлеры панели, доступ.
+
+Используются простые стабы Message/CallbackQuery - без Telegram API.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from doteye import bot, models
+from doteye.config import Settings
+from doteye.crypto import Crypto, generate_key_b64
+from doteye.runtime import Runtime
+from doteye.storage import Storage
+
+
+class FakeMessage:
+    def __init__(self, text: str = "", user_id: int = 1) -> None:
+        self.text = text
+        self.from_user = SimpleNamespace(id=user_id)
+        self.sent: list[tuple] = []
+        self.photos: list[tuple] = []
+        self.edits: list[tuple] = []
+
+    async def answer(self, text: str, **kwargs) -> None:
+        self.sent.append((text, kwargs))
+
+    async def answer_photo(self, photo, **kwargs) -> None:
+        self.photos.append((photo, kwargs))
+
+    async def edit_text(self, text: str, **kwargs) -> None:
+        self.edits.append((text, kwargs))
+
+
+class FakeCallback:
+    def __init__(self, data: str, user_id: int = 1) -> None:
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.message = FakeMessage(user_id=user_id)
+        self.answers: list[tuple] = []
+
+    async def answer(self, text: str = "", **kwargs) -> None:
+        self.answers.append((text, kwargs))
+
+
+@pytest.fixture()
+def env(tmp_path: Path):
+    settings = Settings(model_path="yolov8n.pt", device="cpu", detector_backend="auto")
+    storage = Storage(tmp_path / "bot.db")
+    runtime = Runtime(settings, storage)
+    crypto = Crypto(generate_key_b64())
+    yield SimpleNamespace(
+        settings=settings, storage=storage, runtime=runtime, crypto=crypto
+    )
+    storage.close()
+
+
+def test_panel_keyboard_has_device_button(env) -> None:
+    kb = bot._panel_keyboard(env.runtime)
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("Устройство" in label for label in labels)
+    assert any("YOLO-модель" in label for label in labels)
+
+
+def test_model_keyboard_marks_current(env) -> None:
+    kb = bot._model_keyboard(env.runtime)
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    current = [label for label in labels if "[текущая]" in label]
+    assert len(current) == 1
+    assert len(labels) == len(models.YOLO_MODELS) + 1  # + Назад
+
+
+def test_status_text_contains_key_fields(env) -> None:
+    text = bot._status_text(env.runtime, None, None)
+    assert "presence" in text
+    assert "YOLOv8n" in text
+    assert "cpu" in text
+
+
+@pytest.mark.asyncio
+async def test_cb_mode_toggles(env) -> None:
+    cq = FakeCallback("panel:mode")
+    await bot.cb_mode(cq, env.runtime)
+    assert env.runtime.detect_mode == "identity"
+    await bot.cb_mode(cq, env.runtime)
+    assert env.runtime.detect_mode == "presence"
+
+
+@pytest.mark.asyncio
+async def test_cb_detector_cycles(env) -> None:
+    cq = FakeCallback("panel:detector")
+    await bot.cb_detector(cq, env.runtime)
+    assert env.runtime.detector_backend == "yolo"
+    await bot.cb_detector(cq, env.runtime)
+    assert env.runtime.detector_backend == "yunet"
+
+
+@pytest.mark.asyncio
+async def test_cb_device_cycles(env) -> None:
+    cq = FakeCallback("panel:device")
+    await bot.cb_device(cq, env.runtime)
+    assert env.runtime.device == "cuda"
+    await bot.cb_device(cq, env.runtime)
+    assert env.runtime.device == "mps"
+    await bot.cb_device(cq, env.runtime)
+    assert env.runtime.device == "cpu"
+
+
+@pytest.mark.asyncio
+async def test_cb_model_set_switches_backend_and_saves(env) -> None:
+    cq = FakeCallback("model:set:yolov8s.pt")
+    await bot.cb_model_set(cq, env.runtime, None)
+    assert env.runtime.model_path == "yolov8s.pt"
+    assert env.runtime.detector_backend == "yolo"
+    assert cq.message.edits
+
+
+@pytest.mark.asyncio
+async def test_cb_model_set_unknown(env) -> None:
+    cq = FakeCallback("model:set:nope.pt")
+    await bot.cb_model_set(cq, env.runtime, None)
+    assert env.runtime.model_path == "yolov8n.pt"
+    assert any("Неизвестная" in a[0] for a in cq.answers)
+
+
+@pytest.mark.asyncio
+async def test_cb_snapshot_without_pipeline(env) -> None:
+    cq = FakeCallback("panel:snapshot")
+    await bot.cb_snapshot(cq, None)
+    assert any("выключен" in a[0] for a in cq.answers)
+
+
+@pytest.mark.asyncio
+async def test_cb_people_empty_and_filled(env) -> None:
+    cq = FakeCallback("panel:people")
+    await bot.cb_people(cq, env.storage)
+    assert any("пуст" in text for text, _ in cq.message.sent)
+
+    env.storage.upsert_person("alice", b"emb")
+    await bot.cb_people(cq, env.storage)
+    assert any("alice" in text for text, _ in cq.message.sent)
+
+
+def test_is_admin_rules() -> None:
+    open_settings = Settings(admin_ids=[])
+    assert bot._is_admin(FakeMessage(user_id=99), open_settings) is True
+
+    closed = Settings(admin_ids=[1, 2])
+    assert bot._is_admin(FakeMessage(user_id=1), closed) is True
+    assert bot._is_admin(FakeMessage(user_id=3), closed) is False
+    assert bot._is_admin_user(None, closed) is False
+    assert bot._is_admin_user(2, closed) is True
+
+
+@pytest.mark.asyncio
+async def test_middleware_blocks_stranger(env) -> None:
+    from aiogram.types import Message, User
+
+    closed = Settings(admin_ids=[1])
+    middleware = bot.AccessMiddleware(closed, env.storage, env.runtime, env.crypto, None, None)
+    called = False
+
+    async def handler(event, data):
+        nonlocal called
+        called = True
+
+    sent: list = []
+
+    class AnswerableMessage(Message):
+        async def answer(self, text, **kwargs):  # type: ignore[override]
+            sent.append(text)
+
+    message = AnswerableMessage.model_construct(
+        message_id=1,
+        date=0,
+        chat=SimpleNamespace(id=999),
+        from_user=User.model_construct(id=999, is_bot=False, first_name="x"),
+        text="hi",
+    )
+    await middleware(handler, message, {})
+    assert called is False
+    assert sent
+
+
+@pytest.mark.asyncio
+async def test_middleware_injects_and_passes(env) -> None:
+    middleware = bot.AccessMiddleware(
+        env.settings, env.storage, env.runtime, env.crypto, None, None
+    )
+    seen: dict = {}
+
+    async def handler(event, data):
+        seen.update(data)
+
+    await middleware(handler, FakeMessage(user_id=1), {})
+    assert seen["runtime"] is env.runtime
+    assert seen["storage"] is env.storage
+    assert seen["crypto"] is env.crypto
