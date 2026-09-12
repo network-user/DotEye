@@ -63,6 +63,9 @@ def test_panel_keyboard_has_device_button(env) -> None:
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert any("Устройство" in label for label in labels)
     assert any("YOLO-модель" in label for label in labels)
+    assert any("Охрана" in label for label in labels)
+    assert any("Здоровье" in label for label in labels)
+    assert any("след." in label for label in labels)
 
 
 def test_model_keyboard_marks_current(env) -> None:
@@ -78,14 +81,16 @@ def test_status_text_contains_key_fields(env) -> None:
     assert "presence" in text
     assert "YOLOv8n" in text
     assert "cpu" in text
+    assert "Охрана" in text
 
 
 @pytest.mark.asyncio
 async def test_cb_mode_toggles(env) -> None:
+    recognizer = type("Recognizer", (), {"available": lambda self: True})()
     cq = FakeCallback("panel:mode")
-    await bot.cb_mode(cq, env.runtime)
+    await bot.cb_mode(cq, env.runtime, recognizer)
     assert env.runtime.detect_mode == "identity"
-    await bot.cb_mode(cq, env.runtime)
+    await bot.cb_mode(cq, env.runtime, recognizer)
     assert env.runtime.detect_mode == "presence"
 
 
@@ -137,16 +142,38 @@ async def test_cb_snapshot_without_pipeline(env) -> None:
 async def test_cb_people_empty_and_filled(env) -> None:
     cq = FakeCallback("panel:people")
     await bot.cb_people(cq, env.storage)
-    assert any("пуст" in text for text, _ in cq.message.sent)
+    assert any("пуст" in text for text, _ in cq.message.edits)
 
     env.storage.upsert_person("alice", b"emb")
     await bot.cb_people(cq, env.storage)
-    assert any("alice" in text for text, _ in cq.message.sent)
+    kwargs = cq.message.edits[-1][1]
+    labels = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("alice" in label for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_cb_arm_toggles(env) -> None:
+    cq = FakeCallback("panel:arm")
+    assert env.runtime.armed is True
+    await bot.cb_arm(cq, env.runtime)
+    assert env.runtime.armed is False
+
+
+@pytest.mark.asyncio
+async def test_assign_event_helper(env) -> None:
+    pid = env.storage.upsert_person("alice", None)
+    eid = env.storage.add_event(None, env.crypto.encrypt(b"not-a-jpeg"), 0.1)
+    text = bot._assign_event(eid, pid, env.storage, env.crypto, None)
+    assert "alice" in text
+    row = env.storage.get_event(eid)
+    assert row["person_id"] == pid
 
 
 def test_is_admin_rules() -> None:
-    open_settings = Settings(admin_ids=[])
-    assert bot._is_admin(FakeMessage(user_id=99), open_settings) is True
+    open_settings = Settings(admin_ids=[], allow_open_access=False)
+    assert bot._is_admin(FakeMessage(user_id=99), open_settings) is False
+    open_dev = Settings(admin_ids=[], allow_open_access=True)
+    assert bot._is_admin(FakeMessage(user_id=99), open_dev) is True
 
     closed = Settings(admin_ids=[1, 2])
     assert bot._is_admin(FakeMessage(user_id=1), closed) is True
