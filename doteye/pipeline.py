@@ -1,0 +1,171 @@
+"""Пайплайн обработки: камера -> детекция -> (опц. распознавание) -> событие.
+
+Собирает CameraSource + Detector + Recognizer + Storage в цикл.
+Компоненты пересобираются на ходу, если из чата поменяли источник камеры
+или бэкенд детектора (см. runtime.py). Отвечает за троттлинг
+(detection_interval) и кулдаун событий (cooldown_seconds).
+"""
+
+from __future__ import annotations
+
+import time
+
+import cv2
+import numpy as np
+
+from doteye.camera import CameraSource, build_camera
+from doteye.crypto import Crypto
+from doteye.detector import Detector, build_detector
+from doteye.recognizer import Recognizer
+from doteye.runtime import Runtime
+from doteye.storage import Storage
+
+
+class DetectionEvent:
+    """Результат одного срабатывания.
+
+    jpeg - готовое изображение (JPEG) для отправки в Telegram,
+    сохраняется в Storage зашифрованным.
+    """
+
+    def __init__(
+        self,
+        person_name: str | None,
+        confidence: float,
+        jpeg: bytes,
+        detected_at: float,
+    ) -> None:
+        self.person_name = person_name
+        self.confidence = confidence
+        self.jpeg = jpeg
+        self.detected_at = detected_at
+
+
+class Pipeline:
+    def __init__(
+        self,
+        camera: CameraSource,
+        detector: Detector,
+        recognizer: Recognizer | None,
+        storage: Storage,
+        crypto: Crypto,
+        runtime: Runtime,
+    ) -> None:
+        self._camera = camera
+        self._detector = detector
+        self._recognizer = recognizer
+        self._storage = storage
+        self._crypto = crypto
+        self._runtime = runtime
+        self._last_event_ts = 0.0
+        self._running = False
+        # пауза между итерациями фонового цикла (main задаёт из Settings)
+        self.poll_interval: float = 0.1
+        # ключи компонентов, чтобы понимать, когда нужна пересборка
+        self._camera_source = str(runtime.camera_source)
+        self._detector_backend = runtime.detector_backend
+
+    def start(self) -> None:
+        self._running = True
+        print(
+            f"[pipeline] started (camera={self._camera_source}, "
+            f"detector={self._detector.backend}, mode={self._runtime.detect_mode})"
+        )
+
+    def stop(self) -> None:
+        self._running = False
+        self._camera.close()
+        self._detector.close()
+        print("[pipeline] stopped")
+
+    def _maybe_rebuild_camera(self) -> None:
+        source = str(self._runtime.camera_source)
+        if source == self._camera_source:
+            return
+        print(f"[pipeline] camera -> {source}")
+        old = self._camera
+        self._camera = build_camera(source)
+        self._camera_source = source
+        old.close()
+
+    def _maybe_rebuild_detector(self) -> None:
+        backend = self._runtime.detector_backend
+        if backend == self._detector_backend:
+            return
+        print(f"[pipeline] detector -> {backend}")
+        old = self._detector
+        self._detector = build_detector(
+            backend, self._runtime.model_path, self._runtime.device,
+            self._runtime.min_confidence, self._runtime.remote_processing,
+            self._runtime.remote_url, self._runtime.face_model,
+        )
+        self._detector_backend = backend
+        old.close()
+
+    def _identify(self, frame: np.ndarray) -> tuple[str | None, float]:
+        """Сравнить лицо в кадре с зарегистрированными embeddings."""
+        if self._recognizer is None or not self._recognizer.available():
+            return None, 0.0
+        probe = self._recognizer.embed(frame)
+        if probe is None:
+            return None, 0.0
+
+        best_name: str | None = None
+        best_distance = float("inf")
+        threshold = self._runtime.face_threshold
+        for row in self._storage.list_people_with_embeddings():
+            stored = row["embedding"]
+            if not stored:
+                continue
+            try:
+                plain = self._crypto.decrypt(stored)
+            except Exception:
+                continue
+            distance = self._recognizer.distance(probe, plain)
+            if distance < best_distance:
+                best_distance = distance
+                best_name = row["name"]
+
+        if best_name is not None and best_distance <= threshold:
+            confidence = max(0.0, 1.0 - best_distance)
+            return best_name, confidence
+        return None, 0.0
+
+    def step(self) -> DetectionEvent | None:
+        """Один прогон. Возвращает событие, если есть человек и пройден кулдаун."""
+        self._maybe_rebuild_camera()
+        self._maybe_rebuild_detector()
+
+        frame = self._camera.read()
+        if frame is None:
+            return None
+
+        boxes = self._detector.detect(frame)
+        if not boxes:
+            return None
+
+        now = time.time()
+        if now - self._last_event_ts < self._runtime.cooldown_seconds:
+            return None
+
+        person_name: str | None = None
+        confidence = 0.0
+        if self._runtime.detect_mode == "identity":
+            person_name, confidence = self._identify(frame)
+
+        ok, buf = cv2.imencode(
+            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self._runtime.jpeg_quality]
+        )
+        if not ok:
+            return None
+        jpeg = buf.tobytes()
+        encrypted = self._crypto.encrypt(jpeg)
+
+        person_id = None
+        if person_name is not None:
+            row = self._storage.get_person(person_name)
+            person_id = row["id"] if row else None
+        self._storage.add_event(person_id, encrypted, confidence)
+
+        self._last_event_ts = now
+        return DetectionEvent(person_name, confidence, jpeg, now)
