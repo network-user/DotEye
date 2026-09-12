@@ -28,9 +28,11 @@ python -m doteye.main
 | Действие | Команда |
 |----------|---------|
 | Установка | `pip install -r requirements.txt` |
+| Установка (dev + тесты) | `pip install -r requirements-dev.txt` |
 | Запуск | `python -m doteye.main` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/runtime.py doteye/storage.py run.py` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/runtime.py doteye/storage.py run.py bench.py` |
 | Тесты | `python -m pytest tests -q` |
+| Бенчмарк | `python bench.py` |
 | Lint / typecheck | — |
 
 ## Структура репозитория
@@ -46,9 +48,10 @@ doteye/
 ├── detector.py    детекция: yolo | yunet | motion, auto-деградация, remote-заглушка
 ├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
 ├── crypto.py      AES-256-GCM (кадры, embeddings, remote)
-├── pipeline.py    цикл камера -> детекция -> событие, пересборка, кулдаун
+├── pipeline.py    цикл камера -> детекция -> событие, пересборка, кулдаун на человека
 └── storage.py     SQLite (thread-safe): people, events, settings
-tests/             pytest: crypto, storage, pipeline, detector
+tests/             pytest: crypto, storage, pipeline, detector, models, bot
+bench.py           бенчмарк детектора: FPS и время инференса
 run.py             альтернативная точка входа
 docs/cover.svg     обложка DotBioSite
 ```

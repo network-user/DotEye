@@ -24,6 +24,14 @@ python -m doteye.crypto           # сгенерировать DOTEYE_CRYPTO_KEY
 python -m doteye.main
 ```
 
+Для разработки и тестов:
+
+```bash
+pip install -r requirements-dev.txt   # тянет runtime + pytest
+python -m pytest tests -q
+python bench.py                        # бенчмарк детектора
+```
+
 ## Команды бота (в чате Telegram)
 
 Доступ - только для id из `DOTEYE_ADMIN_IDS` (пусто = всем, dev-режим).
@@ -37,6 +45,7 @@ python -m doteye.main
 | `/mode` | переключить presence / identity |
 | `/camera` | задать источник (0 = вебка, rtsp/http) |
 | `/detector` | бэкенд: auto / yolo / yunet / motion |
+| `/device` | устройство: cpu / cuda / mps |
 | `/model` | выбрать YOLO-модель (с описанием мощности) |
 | `/confidence` | порог детекции 0..1 |
 | `/cooldown` | пауза между уведомлениями, сек |
@@ -96,6 +105,9 @@ doteye/
 ├── crypto.py      AES-256-GCM для кадров, embeddings, remote-передачи
 ├── pipeline.py    цикл: камера -> детекция -> событие, пересборка, кулдаун
 └── storage.py     SQLite (thread-safe): people, events, settings
+tests/             pytest: crypto, storage, pipeline, detector, models, bot
+bench.py           бенчмарк детектора: FPS и время инференса
+run.py             альтернативная точка входа
 ```
 
 Поток данных:
@@ -110,7 +122,7 @@ doteye/
 (identity) recognizer.py ── embedding -> сравнение с people
    │
    ▼
-pipeline.py ── кулдаун -> JPEG -> AES-GCM -> storage.add_event
+pipeline.py ── кулдаун на человека -> JPEG -> AES-GCM -> storage.add_event
    │
    ▼
 asyncio.Queue -> main.send_notifications -> Telegram (фото + подпись)
@@ -123,31 +135,43 @@ asyncio.Queue -> main.send_notifications -> Telegram (фото + подпись)
 - Хранение - SQLite без ORM, схема в `storage.py`, соединение thread-safe (`check_same_thread=False` + lock).
 - Детекция и распознавание - отдельные слои; смена YOLO/insightface не трогает пайплайн.
 - Детектор деградирует автоматически: yolo -> yunet -> motion, если зависимость/модель недоступны.
+- Кулдаун событий - на каждого человека отдельно (`unknown` в presence), не на всю сцену.
 
 ## Тесты
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
 Покрыты `crypto`, `storage` (включая миграцию схемы), `pipeline`
-(событие, кулдаун, распознавание, пересборка при смене модели),
-каталог моделей и фабрика детекторов.
+(событие, кулдаун, распознавание, пересборка при смене модели/устройства),
+каталог моделей, фабрика детекторов и бот (панель, доступ, callback-хендлеры).
+
+## Бенчмарк
+
+```bash
+python bench.py                                  # текущий/auto бэкенд
+python bench.py --backend yolo --model yolov8n.pt
+```
+
+Печатает среднее время инференса, FPS и p95 на синтетических кадрах -
+помогает подобрать модель под железо.
 
 ## План работ
 
 MVP собран и работает. Дальше по порядку:
 
 - [x] **Уведомления** - события уходят из пайплайна в `asyncio.Queue`, `send_notifications()` шлёт фото + подпись админам.
-- [x] **Настройки на ходу** - `/mode`, `/camera`, `/detector`, `/confidence`, `/cooldown` пишут в Storage; пайплайн читает через `Runtime` и пересобирает камеру/детектор.
-- [x] **Админ-панель** - `/panel` на inline-кнопках: статус, режим, детектор, выбор модели, превью, люди, события; уведомление о старте бота.
+- [x] **Настройки на ходу** - `/mode`, `/camera`, `/detector`, `/device`, `/confidence`, `/cooldown` пишут в Storage; пайплайн читает через `Runtime` и пересобирает камеру/детектор.
+- [x] **Админ-панель** - `/panel` на inline-кнопках: статус, режим, детектор, устройство, выбор модели, превью, люди, события; уведомление о старте бота.
 - [x] **Выбор YOLO-модели** - каталог `models.py` с описанием мощности; смена модели пересобирает детектор на ходу.
 - [x] **Identity mode** - insightface `buffalo_l` за опциональной зависимостью, регистрация по фото (`/add`) и хранение embeddings.
 - [x] **Просмотр событий** - `/events` расшифровывает кадры и отправляет фото.
-- [x] **Тесты** - pytest: crypto, storage, pipeline, detector, models.
+- [x] **Тесты** - pytest: crypto, storage, pipeline, detector, models, bot.
+- [x] **Бенчмарк** - `bench.py` меряет FPS и время инференса.
+- [x] **Дедупликация** - кулдаун считается отдельно на каждого (имя в identity, иначе `unknown`), известный не блокирует событие другого.
 - [ ] **Remote-инференс** - `RemoteDetector.detect` бросает `NotImplementedError`; реализовать HTTP-транспорт поверх `Crypto`.
-- [ ] **Дедупликация** - один `last_event_ts` на всё; учесть зоны/камеры, трекинг людей.
-- [ ] **FPS/производительность** - тюнинг `detection_interval`, GPU (`device=cuda`), бенчмарк.
 - [ ] **Деплой** - Dockerfile для слабого железа (Raspberry Pi) + systemd.
 
 ## Лицензия
