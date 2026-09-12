@@ -35,10 +35,12 @@ services:
     image: doteye:latest
     profiles: ["remote"]
     restart: unless-stopped
-    env_file: .env
+    environment:
+      # Remote не должен получать токен Telegram и настройки бота.
+      DOTEYE_CRYPTO_KEY: ${DOTEYE_CRYPTO_KEY:?DOTEYE_CRYPTO_KEY is required}
     command: ["python", "-m", "doteye.remote_server", "--host", "0.0.0.0", "--port", "8099"]
     ports:
-      - "8099:8099"
+      - "127.0.0.1:8099:8099"
     volumes:
       - ./data:/app/data
     # Для ARM (Raspberry Pi) раскомментируй:
