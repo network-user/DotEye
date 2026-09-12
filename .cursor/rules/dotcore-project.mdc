@@ -1,0 +1,28 @@
+---
+description: DotCore контекст проекта - сборка, тесты, соглашения. Читай AGENTS.md для деталей.
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# DotCore Project Context
+
+Канонические инструкции: [AGENTS.md](../../AGENTS.md) в корне репозитория.
+
+## Кратко
+
+- **Тип:** bot (Telegram-бот, aiogram 3)
+- **Установка:** `pip install -r requirements.txt`
+- **Запуск:** `python -m doteye.main`
+- **Тесты:** нет тестов в репо
+
+## Правила
+
+- Источник правды - код, не устаревший README.
+- README в стандарте DotCore: без marketing, без `<details>`, без centered hero.
+- При глобальных изменениях (команды, модули, зависимости, архитектура) обнови README через `generate-readme`, правила через `sync-project-rules`.
+- Минимальный scope изменений.
+
+## README
+
+Человеческая документация: [README.md](../../README.md). Не дублируй её целиком в чат.

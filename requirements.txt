@@ -1,0 +1,16 @@
+# DotEye - runtime зависимости
+aiogram>=3.4
+python-dotenv>=1.0
+opencv-python>=4.8
+numpy>=1.24
+cryptography>=42.0
+
+# Детекция (вариант A, точнее всего): YOLO
+ultralytics>=8.1
+
+# Опционально: распознавание лиц (identity mode)
+# insightface>=0.7.3
+# onnxruntime>=1.16
+
+# Опционально: разработка и тесты
+# pytest>=8.0

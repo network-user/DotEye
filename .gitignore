@@ -1,0 +1,31 @@
+# Секреты и окружение
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Модели и данные приложения (кадры, БД, веса) - не коммитить
+data/
+*.pt
+*.onnx
+*.db
+*.sqlite3
+
+# Артефакты Grok
+.grok/
+
+# IDE
+.idea/
+.vscode/
+*.swp
