@@ -29,7 +29,7 @@ python -m doteye.main
 |----------|---------|
 | Установка | `pip install -r requirements.txt` |
 | Запуск | `python -m doteye.main` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/pipeline.py doteye/recognizer.py doteye/runtime.py doteye/storage.py run.py` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/runtime.py doteye/storage.py run.py` |
 | Тесты | `python -m pytest tests -q` |
 | Lint / typecheck | — |
 
@@ -40,7 +40,8 @@ doteye/
 ├── main.py        точка входа: собирает пайплайн + бота, очередь событий, shutdown
 ├── config.py      Settings из env, дефолты
 ├── runtime.py     env-настройки + переопределения из чата (Storage)
-├── bot.py         aiogram 3: роутер, FSM-диалоги, авторизация, уведомления
+├── models.py      каталог YOLO-моделей с описаниями для панели
+├── bot.py         aiogram 3: роутер, FSM-диалоги, админ-панель, уведомления
 ├── camera.py      источники кадров: вебка / RTSP / MJPEG (фабрика)
 ├── detector.py    детекция: yolo | yunet | motion, auto-деградация, remote-заглушка
 ├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
