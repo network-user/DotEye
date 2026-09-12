@@ -31,7 +31,10 @@ def test_people_crud(tmp_path: Path) -> None:
 
     assert len(st.list_people()) == 1
     assert st.list_people()[0]["has_face"] == 1
-    assert len(st.list_people_with_embeddings()) == 1
+    assert st.list_people()[0]["face_count"] == 2
+    people = st.list_people_with_embeddings()
+    assert len(people) == 1
+    assert len(people[0]["embeddings"]) == 2
 
     assert st.delete_person("alice") is True
     assert st.delete_person("alice") is False
@@ -73,4 +76,24 @@ def test_migration_adds_confidence(tmp_path: Path) -> None:
     st = Storage(db)
     st.add_event(None, b"x", 0.5)
     assert st.recent_events()[0]["confidence"] == 0.5
+    st.close()
+
+
+def test_prune_and_pagination(tmp_path: Path) -> None:
+    st = make_storage(tmp_path)
+    for i in range(5):
+        st.add_event(None, f"f{i}".encode(), event_type="enter")
+    assert st.count_events() == 5
+    page = st.recent_events(limit=2, offset=0)
+    assert len(page) == 2
+    deleted = st.prune_events(max_count=3, ttl_days=None)
+    assert deleted >= 2
+    assert st.count_events() == 3
+    st.close()
+
+
+def test_wal_enabled(tmp_path: Path) -> None:
+    st = make_storage(tmp_path)
+    mode = st._conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"
     st.close()
