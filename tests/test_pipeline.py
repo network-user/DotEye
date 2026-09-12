@@ -61,6 +61,7 @@ def make_settings(**over: object) -> Settings:
         "face_threshold": 0.4,
         "camera_source": "0",
         "detector_backend": "auto",
+        "model_path": "yolov8n.pt",
     }
     base.update(over)
     return Settings(**base)  # type: ignore[arg-type]
@@ -122,3 +123,28 @@ def test_identity_unknown_when_far(tmp_path: Path) -> None:
     event = pipe.step()
     assert event is not None
     assert event.person_name is None
+
+
+def test_model_change_triggers_rebuild(tmp_path: Path, monkeypatch) -> None:
+    pipe = build(tmp_path)
+    calls: list[tuple] = []
+
+    def fake_build(backend, model_path, *args, **kwargs):
+        calls.append((backend, model_path))
+        return FakeDetector()
+
+    monkeypatch.setattr("doteye.pipeline.build_detector", fake_build)
+    pipe._runtime.model_path = "yolov8s.pt"
+    pipe.step()
+    assert calls and calls[-1][1] == "yolov8s.pt"
+
+    calls.clear()
+    pipe.step()  # модель не менялась - пересборки нет
+    assert calls == []
+
+
+def test_runtime_model_override(tmp_path: Path) -> None:
+    pipe = build(tmp_path)
+    assert pipe._runtime.model_path == "yolov8n.pt"
+    pipe._runtime.model_path = "yolov8m.pt"
+    assert pipe._runtime.model_path == "yolov8m.pt"
