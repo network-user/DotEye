@@ -95,6 +95,20 @@ def test_cooldown_blocks_second_event(tmp_path: Path) -> None:
     assert pipe.step() is None
 
 
+def test_cooldown_is_per_person(tmp_path: Path) -> None:
+    """Кулдаун "unknown" не должен блокировать другое имя."""
+    pipe = build(tmp_path, cooldown_seconds=100.0)
+    assert pipe.step() is not None  # unknown
+    assert pipe.step() is None       # тот же unknown в кулдауне
+
+    pipe._runtime.detect_mode = "identity"
+    pipe._recognizer = FakeRecognizer("alice", 0.1)
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    event = pipe.step()
+    assert event is not None
+    assert event.person_name == "alice"
+
+
 def test_identity_recognizes_person(tmp_path: Path) -> None:
     pipe = build(
         tmp_path,
@@ -148,3 +162,21 @@ def test_runtime_model_override(tmp_path: Path) -> None:
     assert pipe._runtime.model_path == "yolov8n.pt"
     pipe._runtime.model_path = "yolov8m.pt"
     assert pipe._runtime.model_path == "yolov8m.pt"
+
+
+def test_device_change_triggers_rebuild(tmp_path: Path, monkeypatch) -> None:
+    pipe = build(tmp_path)
+    calls: list[tuple] = []
+
+    def fake_build(backend, model_path, device, *args, **kwargs):
+        calls.append((backend, model_path, device))
+        return FakeDetector()
+
+    monkeypatch.setattr("doteye.pipeline.build_detector", fake_build)
+    pipe._runtime.device = "cuda"
+    pipe.step()
+    assert calls and calls[-1][2] == "cuda"
+
+    calls.clear()
+    pipe.step()
+    assert calls == []
