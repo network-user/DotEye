@@ -4,12 +4,22 @@
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/Platform-Telegram%20%7C%20Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat" alt="Platform" />
   <img src="https://img.shields.io/badge/Category-Bot-orange?style=flat" alt="Category" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-683-lightgrey?style=flat" alt="683 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-4847-lightgrey?style=flat" alt="4847 lines of code" /><!-- loc:end -->
 </p>
 
 <img src="docs/cover.svg" width="720" alt="DotEye">
 
-DotEye - Telegram-бот, который определяет, кто зашёл в комнату. Подключает вебку ноутбука, IP-камеру или телефон, детектирует людей через YOLO и шлёт уведомления в чат. Вся настройка ведётся прямо внутри Telegram. Два режима: детекция присутствия и распознавание лиц (identity).
+DotEye - Telegram-бот, который определяет, кто зашёл в комнату. Подключает вебку, IP-камеру или несколько источников сразу, детектирует людей через YOLO и шлёт уведомления только на вход и выход. Настройка ведётся в чате: охрана, тихие часы, зоны кадра, эталоны лиц.
+
+## Что внутри
+
+- **Охрана и тихие часы**: кнопка вкл/выкл и интервал `HH:MM-HH:MM`, чтобы ночью не спамить.
+- **Вход/выход по трекеру**: IoU-сопровождение боксов, событие когда человек появился или исчез, а не пока стоит в кадре.
+- **Несколько людей в кадре**: каждый бокс кропается и в identity сравнивается со всеми эталонами.
+- **Кадр с подписью**: на фото в Telegram рисуются бокс, имя и уверенность. У неизвестного кнопка «Это кто?».
+- **Панель**: люди и события списками с кнопками, пагинация, `/cancel` для FSM, здоровье камеры и фактический бэкенд детектора.
+- **Несколько камер и зоны**: источники через `|`, ROI в относительных координатах 0..1.
+- **Remote с fallback**: AES-GCM + токен, keep-alive, HTTPS, при падении сервера локальный детектор и алерт в чат.
 
 ## Запуск
 
@@ -18,7 +28,7 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows
 pip install -r requirements.txt
 
-cp .env.example .env              # заполни DOTEYE_BOT_TOKEN и остальное
+cp .env.example .env              # заполни DOTEYE_BOT_TOKEN и DOTEYE_ADMIN_IDS
 python -m doteye.crypto           # сгенерировать DOTEYE_CRYPTO_KEY
 
 python -m doteye.main
@@ -34,37 +44,35 @@ python bench.py                        # бенчмарк детектора
 
 ## Команды бота (в чате Telegram)
 
-Доступ - только для id из `DOTEYE_ADMIN_IDS` (пусто = всем, dev-режим).
-При старте бот сам присылает админам уведомление с текущими настройками и кнопкой панели.
+Доступ - только для id из `DOTEYE_ADMIN_IDS`. Пустой список никого не пускает; для локальной отладки `DOTEYE_ALLOW_OPEN_ACCESS=1`.
+При старте бот шлёт админам статус и кнопку панели.
 
 | Команда | Назначение |
 |---------|-----------|
 | `/panel` | админ-панель на inline-кнопках |
 | `/start` | приветствие |
-| `/status` | текущие настройки |
+| `/status` | текущие настройки и здоровье |
 | `/mode` | переключить presence / identity |
-| `/camera` | задать источник (0 = вебка, rtsp/http) |
+| `/camera` | источник (0, rtsp/http; несколько через `\|`) |
 | `/detector` | бэкенд: auto / yolo / yunet / motion |
 | `/device` | устройство: cpu / cuda / mps |
-| `/model` | выбрать YOLO-модель (с описанием мощности) |
+| `/model` | выбрать YOLO-модель |
 | `/confidence` | порог детекции 0..1 |
-| `/cooldown` | пауза между уведомлениями, сек |
+| `/cooldown` | пауза повторного входа, сек |
 | `/people` | список известных людей |
 | `/add` | добавить человека (имя + фото лица) |
 | `/remove` | удалить человека по имени |
-| `/events` | последние события с кадрами |
+| `/events` | события с кадрами, по страницам |
+| `/cancel` | отменить текущий ввод |
 | `/help` | справка |
 
 ## Админ-панель
 
-`/panel` открывает inline-панель: статус, переключение режима и детектора,
-выбор YOLO-модели, превью камеры, люди и события. Кнопки меняют настройки
-через `runtime.py`, пайплайн подхватывает их на следующем кадре.
+`/panel` открывает inline-панель: охрана, режим, детектор (с подписью следующего), устройство, YOLO-модель, превью из кэша кадра, здоровье камеры, люди, события, камера, remote, порог, кулдаун, интервал, порог лица, тихие часы, уведомления о выходе, зоны.
 
-Выбор модели (`/model` или кнопка «YOLO-модель») показывает карточки:
-размер весов, число параметров, примерная скорость и точность, для чего
-модель подходит. Смена модели переключает детектор на `yolo` и пересобирает
-его на ходу, без перезапуска процесса.
+Выбор модели (`/model` или кнопка «YOLO-модель») показывает карточки: размер весов, число параметров, примерная скорость и точность. Смена модели переключает детектор на `yolo` и пересобирает его на ходу.
+
+Кнопка «Это кто?» на неизвестном входе привязывает событие к человеку и пишет новый эталон с кропа. У человека можно хранить несколько фото.
 
 | Модель | Размер | Параметры | Скорость (CPU) | Точность | Когда брать |
 |--------|--------|-----------|----------------|----------|-------------|
@@ -86,59 +94,9 @@ python bench.py                        # бенчмарк детектора
   <img src="https://img.shields.io/badge/NumPy-013243?style=for-the-badge&logo=numpy&logoColor=white" alt="NumPy" />
   <img src="https://img.shields.io/badge/SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white" alt="SQLite" />
   <img src="https://img.shields.io/badge/cryptography-555555?style=for-the-badge" alt="cryptography" />
+  <img src="https://img.shields.io/badge/pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white" alt="pytest" />
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
 </p>
-
-## Архитектура
-
-Бот и пайплайн обработки работают в одном процессе. Telegram-часть на aiogram 3 (async), а OpenCV/YOLO - CPU-bound операции, вынесенные в отдельный поток через `asyncio.to_thread`. События пайплайна попадают в `asyncio.Queue`, откуда их разбирает `send_notifications()` и рассылает админам фото + подпись.
-
-```
-doteye/
-├── main.py        точка входа: собирает пайплайн + бота, очередь, shutdown
-├── config.py      Settings из env-переменных, дефолты, .env
-├── runtime.py     настройки env + переопределения из чата (Storage)
-├── models.py      каталог YOLO-моделей с описаниями для панели
-├── bot.py         aiogram 3: роутер, FSM-диалоги, админ-панель, уведомления
-├── camera.py      источники кадров: вебка / RTSP / HTTP-MJPEG (фабрика)
-├── detector.py    детекция: yolo | yunet | motion (auto-деградация), remote
-├── remote.py      HTTP + AES-GCM транспорт и сервер remote-инференса
-├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
-├── crypto.py      AES-256-GCM для кадров, embeddings, remote-передачи
-├── pipeline.py    цикл: камера -> детекция -> событие, пересборка, кулдаун
-└── storage.py     SQLite (thread-safe): people, events, settings
-tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote
-bench.py           бенчмарк детектора: FPS и время инференса
-remote_server.py   точка входа для remote-инференса на сервере
-run.py             альтернативная точка входа
-Dockerfile         образ (bot/remote), docker-compose.yml, deploy/
-```
-
-Поток данных:
-
-```
-камера (camera.py)
-   │  кадр BGR
-   ▼
-детектор (detector.py)  ── yolo / yunet / motion
-   │  боксы людей
-   ▼
-(identity) recognizer.py ── embedding -> сравнение с people
-   │
-   ▼
-pipeline.py ── кулдаун на человека -> JPEG -> AES-GCM -> storage.add_event
-   │
-   ▼
-asyncio.Queue -> main.send_notifications -> Telegram (фото + подпись)
-```
-
-Инварианты:
-
-- Единственный источник правды - `Settings` (env) + `Runtime` (переопределения из чата поверх env).
-- Кадры и embeddings хранятся только зашифрованными (AES-256-GCM), ключ в `DOTEYE_CRYPTO_KEY`.
-- Хранение - SQLite без ORM, схема в `storage.py`, соединение thread-safe (`check_same_thread=False` + lock).
-- Детекция и распознавание - отдельные слои; смена YOLO/insightface не трогает пайплайн.
-- Детектор деградирует автоматически: yolo -> yunet -> motion, если зависимость/модель недоступны.
-- Кулдаун событий - на каждого человека отдельно (`unknown` в presence), не на всю сцену.
 
 ## Тесты
 
@@ -147,9 +105,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-Покрыты `crypto`, `storage` (включая миграцию схемы), `pipeline`
-(событие, кулдаун, распознавание, пересборка при смене модели/устройства),
-каталог моделей, фабрика детекторов и бот (панель, доступ, callback-хендлеры).
+Покрыты crypto, storage (WAL, prune, несколько эталонов), pipeline (вход/выход, identity по кропу, тихие часы, кэш превью), tracker, zones, каталог моделей, фабрика детекторов, remote (токен, fallback) и бот (панель, доступ, callback-хендлеры).
 
 ## Бенчмарк
 
@@ -158,16 +114,13 @@ python bench.py                                  # текущий/auto бэке�
 python bench.py --backend yolo --model yolov8n.pt
 ```
 
-Печатает среднее время инференса, FPS и p95 на синтетических кадрах -
-помогает подобрать модель под железо.
+Печатает среднее время инференса, FPS и p95 на синтетических кадрах.
 
 ## Remote-инференс
 
-Камера и инференс могут жить на разных машинах: кадр шифруется AES-256-GCM
-и уходит POST-ом на сервер, оттуда возвращаются боксы. Полезно, когда камера
-на слабом устройстве, а модель тяжёлая.
+Камера и инференс могут жить на разных машинах: кадр шифруется AES-256-GCM и уходит POST-ом, заголовок `X-DotEye-Token` - производный от ключа. HTTPS берётся из URL. Если сервер недоступен, клиент уходит на локальный детектор (если включён fallback) и шлёт алерт в чат.
 
-На сервере (с GPU или мощным CPU):
+На сервере:
 
 ```bash
 export DOTEYE_CRYPTO_KEY=<тот же ключ, что у клиента>
@@ -176,45 +129,83 @@ python -m doteye.remote_server --host 0.0.0.0 --port 8099 \
 curl http://localhost:8099/health    # {"status": "ok"}
 ```
 
-На машине с камерой в `.env`:
+На машине с камерой:
 
 ```
 DOTEYE_REMOTE_PROCESSING=1
 DOTEYE_REMOTE_URL=http://<server-ip>:8099
+DOTEYE_REMOTE_FALLBACK=1
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```
 
-Протокол: `POST /detect {"frame": "<base64(AES-GCM JPEG)>"}` -> `{"boxes": [[x1,y1,x2,y2], ...]}`,
-плюс `GET /health`. Если сервер недоступен, детектор возвращает пустой
-список и пайплайн не падает.
+Протокол: `POST /detect` + токен, тело `{"frame": "<base64(AES-GCM JPEG)>"}` -> `{"boxes": [[x1,y1,x2,y2], ...]}`, плюс `GET /health`.
 
 ## Деплой
 
 - `Dockerfile` - образ для бота и remote-сервера (Python 3.12 slim + OpenCV/ffmpeg, непривилегированный пользователь).
 - `docker-compose.yml` - сервис `doteye` (камера + инференс) и `remote` (профиль `remote`).
 - `deploy/doteye.service` - unit для systemd.
-- `deploy/README.md` - пошагово: Compose, systemd, Raspberry Pi (ARM).
+- `deploy/README.md` - Compose, systemd, Raspberry Pi (ARM).
 
 ```bash
 cp .env.example .env && python -m doteye.crypto
 docker compose up -d --build doteye
 ```
 
-## План работ
+## Архитектура
 
-MVP собран и работает. Дальше по порядку:
+Бот и пайплайн в одном процессе. Telegram на aiogram 3, OpenCV/YOLO в потоке через `asyncio.to_thread`. События (вход, выход, remote-алерт) идут в `asyncio.Queue` с вытеснением старых при переполнении.
 
-- [x] **Уведомления** - события уходят из пайплайна в `asyncio.Queue`, `send_notifications()` шлёт фото + подпись админам.
-- [x] **Настройки на ходу** - `/mode`, `/camera`, `/detector`, `/device`, `/confidence`, `/cooldown` пишут в Storage; пайплайн читает через `Runtime` и пересобирает камеру/детектор.
-- [x] **Админ-панель** - `/panel` на inline-кнопках: статус, режим, детектор, устройство, выбор модели, превью, люди, события; уведомление о старте бота.
-- [x] **Выбор YOLO-модели** - каталог `models.py` с описанием мощности; смена модели пересобирает детектор на ходу.
-- [x] **Identity mode** - insightface `buffalo_l` за опциональной зависимостью, регистрация по фото (`/add`) и хранение embeddings.
-- [x] **Просмотр событий** - `/events` расшифровывает кадры и отправляет фото.
-- [x] **Тесты** - pytest: crypto, storage, pipeline, detector, models, bot, remote.
-- [x] **Бенчмарк** - `bench.py` меряет FPS и время инференса.
-- [x] **Дедупликация** - кулдаун считается отдельно на каждого (имя в identity, иначе `unknown`), известный не блокирует событие другого.
-- [x] **Remote-инференс** - HTTP-транспорт поверх AES-GCM (`remote.py`), сервер `remote_server.py`.
-- [x] **Деплой** - Dockerfile + docker-compose, systemd-unit, инструкция для ARM.
+```
+doteye/
+├── main.py        точка входа: пайплайн + бот, очередь, shutdown
+├── config.py      Settings из env-переменных, дефолты
+├── runtime.py     env + переопределения из чата (Storage)
+├── models.py      каталог YOLO-моделей для панели
+├── bot.py         aiogram 3: панель, FSM, «это кто?», уведомления
+├── camera.py      вебка / RTSP / MJPEG, reconnect, несколько через |
+├── detector.py    yolo | yunet | motion, motion-gate, remote+fallback
+├── tracker.py     IoU-трекер входа и выхода
+├── zones.py       ROI кадра в координатах 0..1
+├── annotate.py    кроп бокса и рамки на JPEG
+├── remote.py      HTTP keep-alive + AES-GCM + токен
+├── recognizer.py  insightface (CPU/CUDA) + DummyRecognizer
+├── crypto.py      AES-256-GCM, auth_token для remote
+├── pipeline.py    камеры -> трек -> событие, кэш кадра, prune БД
+└── storage.py     SQLite WAL: people, embeddings, events, settings
+tests/             pytest
+bench.py           бенчмарк детектора
+remote_server.py   точка входа remote-сервера
+run.py             альтернативная точка входа
+Dockerfile         образ; docker-compose.yml; deploy/
+```
+
+Поток данных:
+
+```
+камеры (camera.py)
+   │  кадр BGR (кэш для превью)
+   ▼
+motion-gate + детектор  ── yolo / yunet / motion / remote
+   │  боксы, фильтр зон
+   ▼
+IoU-трекер ── enter / active / exit
+   │
+   ▼
+(identity) кроп бокса -> embedding -> min по эталонам человека
+   │
+   ▼
+annotate JPEG -> AES-GCM -> storage (TTL/лимит) -> Queue -> Telegram
+```
+
+Инварианты:
+
+- Настройки: `Settings` (env) + `Runtime` (чат поверх env).
+- Кадры и embeddings только зашифрованными (AES-256-GCM).
+- SQLite без ORM, WAL, prune по `events_max` и `events_ttl_days`.
+- Событие на появление/исчезновение трека, кулдаун гасит дребезг.
+- Превью не вызывает второй `VideoCapture.read()`.
+- Детектор деградирует yolo -> yunet -> motion; remote падает в fallback, а не в «никого нет».
 
 ## Лицензия
 

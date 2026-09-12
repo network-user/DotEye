@@ -14,7 +14,7 @@ alwaysApply: true
 - **Тип:** bot (Telegram-бот, aiogram 3)
 - **Установка:** `pip install -r requirements.txt`
 - **Запуск:** `python -m doteye.main`
-- **Тесты:** нет тестов в репо
+- **Тесты:** `python -m pytest tests -q`
 
 ## Правила
 

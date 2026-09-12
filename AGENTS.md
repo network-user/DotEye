@@ -31,7 +31,7 @@ python -m doteye.main
 | Установка (dev + тесты) | `pip install -r requirements-dev.txt` |
 | Запуск | `python -m doteye.main` |
 | Remote-сервер | `python -m doteye.remote_server --host 0.0.0.0 --port 8099` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/runtime.py doteye/storage.py remote_server.py run.py bench.py` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py remote_server.py run.py bench.py` |
 | Тесты | `python -m pytest tests -q` |
 | Бенчмарк | `python bench.py` |
 | Docker | `docker compose up -d --build doteye` |
@@ -51,9 +51,12 @@ doteye/
 ├── remote.py      HTTP + AES-GCM: клиент и сервер remote-инференса
 ├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
 ├── crypto.py      AES-256-GCM (кадры, embeddings, remote)
-├── pipeline.py    цикл камера -> детекция -> событие, пересборка, кулдаун на человека
-└── storage.py     SQLite (thread-safe): people, events, settings
-tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote
+├── tracker.py     IoU-трекер входа/выхода
+├── zones.py       ROI кадра (0..1)
+├── annotate.py    кроп бокса и рамки на JPEG
+├── pipeline.py    цикл камера -> трек enter/exit -> событие, кэш кадра, prune
+└── storage.py     SQLite WAL: people, embeddings, events, settings
+tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote, tracker, zones
 bench.py           бенчмарк детектора: FPS и время инференса
 remote_server.py   точка входа remote-сервера инференса
 run.py             альтернативная точка входа
@@ -75,19 +78,29 @@ docs/cover.svg     обложка DotBioSite
 |------------|------------|
 | `DOTEYE_BOT_TOKEN` | токен Telegram-бота |
 | `DOTEYE_ADMIN_IDS` | id админов через запятую |
+| `DOTEYE_ALLOW_OPEN_ACCESS` | `1` = пустой список админов пускает всех (только dev) |
 | `DOTEYE_DETECT_MODE` | `presence` \| `identity` |
-| `DOTEYE_CAMERA_SOURCE` | `0` = вебка, либо rtsp/http адрес |
+| `DOTEYE_CAMERA_SOURCE` | `0` = вебка, rtsp/http; несколько через `\|` |
 | `DOTEYE_DETECTOR` | `auto` \| `yolo` \| `yunet` \| `motion` |
 | `DOTEYE_MODEL_PATH` | путь к YOLO-модели |
 | `DOTEYE_FACE_MODEL` | путь к ONNX-модели YuNet (для детектора yunet) |
 | `DOTEYE_DEVICE` | `cpu` \| `cuda` \| `mps` |
 | `DOTEYE_MIN_CONFIDENCE` | порог детекции 0..1 |
-| `DOTEYE_COOLDOWN_SECONDS` | пауза между уведомлениями |
+| `DOTEYE_COOLDOWN_SECONDS` | пауза повторного входа, сек |
 | `DOTEYE_JPEG_QUALITY` | качество JPEG для кадров событий |
 | `DOTEYE_EVENTS_LIMIT` | сколько событий показывает `/events` |
 | `DOTEYE_FACE_THRESHOLD` | порог дистанции embedding (identity) |
+| `DOTEYE_ARMED` | `1` = охрана включена |
+| `DOTEYE_QUIET_HOURS` | тихие часы `HH:MM-HH:MM` |
+| `DOTEYE_NOTIFY_EXIT` | `1` = уведомлять о выходе |
+| `DOTEYE_IMGSZ` | размер входа YOLO, по умолчанию 640 |
+| `DOTEYE_EVENTS_MAX` | лимит строк событий в БД |
+| `DOTEYE_EVENTS_TTL_DAYS` | TTL событий, дни |
+| `DOTEYE_ZONES` | JSON зон кадра |
 | `DOTEYE_REMOTE_PROCESSING` | `1` = вынос инференса на сервер |
 | `DOTEYE_REMOTE_URL` | адрес remote-сервера |
+| `DOTEYE_REMOTE_FALLBACK` | `1` = локальный детектор при падении remote |
+| `DOTEYE_REMOTE_INSECURE` | `1` = не проверять TLS remote |
 | `DOTEYE_CRYPTO_KEY` | base64 32 байта для AES-GCM |
 
 Не читай `.env`. Не коммить секреты.
@@ -95,7 +108,7 @@ docs/cover.svg     обложка DotBioSite
 ## Что делать агенту
 
 - Перед правками прочитай затронутые файлы и соседний код.
-- После изменений запусти `python -m py_compile doteye/*.py run.py`.
+- После изменений запусти `python -m py_compile doteye/*.py run.py` и `python -m pytest tests -q`.
 - **README-sync:** при глобальных изменениях (новые/удалённые модули, зависимости, команды, смена архитектуры или runtime) обнови `README.md` через `generate-readme` и `AGENTS.md` через `sync-project-rules` - в том числе пересчёт LoC. Мелкие правки README не трогают.
 - Не латай разметку README вручную - перегенерируй скиллом.
 - Минимальный diff - не рефактори несвязанный код.
