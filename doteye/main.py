@@ -5,8 +5,8 @@ Telegram-бота и пайплайн обработки в одном проц�
 event loop, а OpenCV/YOLO - CPU-bound, поэтому шаг пайплайна выполняется
 в отдельном потоке через asyncio.to_thread.
 
-События пайплайна кладутся в asyncio.Queue, откуда их разбирает
-send_notifications() и рассылает админам фото + подпись.
+События пайплайна сначала сохраняются в SQLite outbox, затем отдельная задача
+доставляет их администраторам с повторными попытками после ошибок Telegram.
 
 Запуск:
     python -m doteye.main
@@ -17,38 +17,23 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from doteye.bot import notify_startup, run_bot, send_notifications
+from doteye.bot import notify_startup, queue_notifications, run_bot, send_notifications
 from doteye.camera import build_cameras
-from doteye.config import get_settings
+from doteye.config import ConfigurationError, Settings, get_settings
 from doteye.crypto import Crypto
 from doteye.detector import build_detector
-from doteye.pipeline import DetectionEvent, Pipeline
+from doteye.pipeline import Pipeline
 from doteye.recognizer import build_recognizer
 from doteye.runtime import Runtime
 from doteye.storage import Storage
-
-
-def _enqueue(events: asyncio.Queue[DetectionEvent], event: DetectionEvent) -> None:
-    """Положить событие; при переполнении вытеснить самое старое."""
-    try:
-        events.put_nowait(event)
-        return
-    except asyncio.QueueFull:
-        pass
-    try:
-        events.get_nowait()
-    except asyncio.QueueEmpty:
-        pass
-    try:
-        events.put_nowait(event)
-    except asyncio.QueueFull:
-        print("[queue] drop")
+from doteye.voice import build_voice
 
 
 async def _pipeline_loop(
-    pipeline: Pipeline, events: asyncio.Queue[DetectionEvent]
+    pipeline: Pipeline, storage: Storage,
+    settings: Settings, crypto: Crypto,
 ) -> None:
-    """Фоновый цикл: гоняет step() и складывает события в очередь."""
+    """Фоновый цикл: выполняет step() и сохраняет события в outbox."""
     while True:
         try:
             batch = await asyncio.to_thread(pipeline.step)
@@ -59,12 +44,20 @@ async def _pipeline_loop(
         for event in batch:
             who = event.person_name or event.event_type
             print(f"[event] {event.event_type} {who} ({event.confidence:.2f})")
-            _enqueue(events, event)
+            # В outbox запись попадает до Telegram, поэтому очередь служит
+            # только локальным неблокирующим индикатором совместимости.
+            await asyncio.to_thread(
+                queue_notifications, settings, storage, crypto, event,
+            )
         await asyncio.sleep(pipeline.poll_interval)
 
 
 async def main() -> None:
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ConfigurationError as exc:
+        print(f"[config] {exc}")
+        return
     if not settings.has_token:
         print("[config] DOTEYE_BOT_TOKEN не задан. Заполни .env (см. .env.example).")
         return
@@ -80,8 +73,7 @@ async def main() -> None:
         crypto = None
 
     recognizer = build_recognizer(runtime.device)
-
-    events: asyncio.Queue[DetectionEvent] = asyncio.Queue(maxsize=32)
+    voice = build_voice(runtime)
 
     pipeline = None
     if crypto is not None:
@@ -95,17 +87,18 @@ async def main() -> None:
             remote_insecure=runtime.remote_insecure,
         )
         pipeline = Pipeline(cameras, detector, recognizer, storage, crypto, runtime)
+        pipeline.set_voice(voice)
         pipeline.start()
 
     tasks = [
         asyncio.create_task(
-            run_bot(settings, storage, runtime, crypto, recognizer, pipeline)
+            run_bot(settings, storage, runtime, crypto, recognizer, pipeline, voice)
         )
     ]
     if settings.has_admins:
-        tasks.append(asyncio.create_task(send_notifications(settings, events)))
+        tasks.append(asyncio.create_task(send_notifications(settings, storage, crypto)))
     if pipeline is not None:
-        tasks.append(asyncio.create_task(_pipeline_loop(pipeline, events)))
+        tasks.append(asyncio.create_task(_pipeline_loop(pipeline, storage, settings, crypto)))
 
     await notify_startup(settings, runtime, recognizer, pipeline)
 
@@ -118,6 +111,7 @@ async def main() -> None:
                 await task
         if pipeline is not None:
             pipeline.stop()
+        voice.close()
         storage.close()
 
 

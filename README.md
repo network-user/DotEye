@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/Platform-Telegram%20%7C%20Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat" alt="Platform" />
   <img src="https://img.shields.io/badge/Category-Bot-orange?style=flat" alt="Category" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-4847-lightgrey?style=flat" alt="4847 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-6685-lightgrey?style=flat" alt="6685 lines of code" /><!-- loc:end -->
 </p>
 
 <img src="docs/cover.svg" width="720" alt="DotEye">
@@ -18,8 +18,9 @@ DotEye - Telegram-бот, который определяет, кто зашёл
 - **Несколько людей в кадре**: каждый бокс кропается и в identity сравнивается со всеми эталонами.
 - **Кадр с подписью**: на фото в Telegram рисуются бокс, имя и уверенность. У неизвестного кнопка «Это кто?».
 - **Панель**: люди и события списками с кнопками, пагинация, `/cancel` для FSM, здоровье камеры и фактический бэкенд детектора.
-- **Несколько камер и зоны**: источники через `|`, ROI в относительных координатах 0..1.
-- **Remote с fallback**: AES-GCM + токен, keep-alive, HTTPS, при падении сервера локальный детектор и алерт в чат.
+- **Несколько камер и зоны**: источники через `|`, отдельный reader с последним кадром для каждой камеры, reconnect backoff и ROI в координатах 0..1.
+- **Remote с fallback**: ограниченный HTTP API, AES-GCM, проверка схемы ответов, локальный fallback и HTTPS/VPN для внешней сети.
+- **Доставка событий**: SQLite outbox с зашифрованным JPEG, идемпотентностью и повторной отправкой после ошибки Telegram.
 
 ## Запуск
 
@@ -44,7 +45,7 @@ python bench.py                        # бенчмарк детектора
 
 ## Команды бота (в чате Telegram)
 
-Доступ - только для id из `DOTEYE_ADMIN_IDS`. Пустой список никого не пускает; для локальной отладки `DOTEYE_ALLOW_OPEN_ACCESS=1`.
+Доступ - только для id из `DOTEYE_ADMIN_IDS`. Пустой список никого не пускает. Для локальной отладки `DOTEYE_ALLOW_OPEN_ACCESS=1` требует `DOTEYE_ENV=development`.
 При старте бот шлёт админам статус и кнопку панели.
 
 | Команда | Назначение |
@@ -124,21 +125,24 @@ python bench.py --backend yolo --model yolov8n.pt
 
 ```bash
 export DOTEYE_CRYPTO_KEY=<тот же ключ, что у клиента>
-python -m doteye.remote_server --host 0.0.0.0 --port 8099 \
+python -m doteye.remote_server --host 127.0.0.1 --port 8099 \
     --model yolov8n.pt --device cuda
 curl http://localhost:8099/health    # {"status": "ok"}
 ```
+
+Внешнюю камеру подключай к remote только через VPN или TLS reverse proxy. Прямой HTTP разрешён клиенту только на loopback. В production внеси имя remote-хоста и сетевых камер в точный CSV allowlist `DOTEYE_ALLOWED_URL_HOSTS`.
 
 На машине с камерой:
 
 ```
 DOTEYE_REMOTE_PROCESSING=1
-DOTEYE_REMOTE_URL=http://<server-ip>:8099
+DOTEYE_REMOTE_URL=https://<remote-host>
+DOTEYE_ALLOWED_URL_HOSTS=<remote-host>
 DOTEYE_REMOTE_FALLBACK=1
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```
 
-Протокол: `POST /detect` + токен, тело `{"frame": "<base64(AES-GCM JPEG)>"}` -> `{"boxes": [[x1,y1,x2,y2], ...]}`, плюс `GET /health`.
+Протокол: `POST /detect` + токен, тело `{"frame": "<base64(AES-GCM JPEG)>"}` -> `{"boxes": [[x1,y1,x2,y2], ...]}`, плюс `GET /health`. Сервер ограничивает размер запросов, изображения, ответов, соединений и время чтения.
 
 ## Деплой
 
@@ -154,25 +158,26 @@ docker compose up -d --build doteye
 
 ## Архитектура
 
-Бот и пайплайн в одном процессе. Telegram на aiogram 3, OpenCV/YOLO в потоке через `asyncio.to_thread`. События (вход, выход, remote-алерт) идут в `asyncio.Queue` с вытеснением старых при переполнении.
+Бот и пайплайн в одном процессе. Telegram на aiogram 3, OpenCV/YOLO выполняются вне event loop. У каждой камеры свой reader, а события до отправки в Telegram сохраняются в долговечный SQLite outbox.
 
 ```
 doteye/
-├── main.py        точка входа: пайплайн + бот, очередь, shutdown
-├── config.py      Settings из env-переменных, дефолты
+├── main.py        точка входа: пайплайн + бот, SQLite outbox, shutdown
+├── config.py      Settings из env, валидация и allowlist сетевых URL
 ├── runtime.py     env + переопределения из чата (Storage)
 ├── models.py      каталог YOLO-моделей для панели
 ├── bot.py         aiogram 3: панель, FSM, «это кто?», уведомления
-├── camera.py      вебка / RTSP / MJPEG, reconnect, несколько через |
+├── camera.py      вебка / RTSP / MJPEG, reader-поток и reconnect backoff
 ├── detector.py    yolo | yunet | motion, motion-gate, remote+fallback
 ├── tracker.py     IoU-трекер входа и выхода
 ├── zones.py       ROI кадра в координатах 0..1
 ├── annotate.py    кроп бокса и рамки на JPEG
-├── remote.py      HTTP keep-alive + AES-GCM + токен
+├── remote.py      ограниченный transport, AES-GCM, проверка ответов и лимиты
 ├── recognizer.py  insightface (CPU/CUDA) + DummyRecognizer
 ├── crypto.py      AES-256-GCM, auth_token для remote
 ├── pipeline.py    камеры -> трек -> событие, кэш кадра, prune БД
-└── storage.py     SQLite WAL: people, embeddings, events, settings
+├── remote_server.py точка входа пакета для remote inference
+└── storage.py     SQLite WAL: people, embeddings, events, settings, outbox
 tests/             pytest
 bench.py           бенчмарк детектора
 remote_server.py   точка входа remote-сервера
@@ -195,14 +200,16 @@ IoU-трекер ── enter / active / exit
 (identity) кроп бокса -> embedding -> min по эталонам человека
    │
    ▼
-annotate JPEG -> AES-GCM -> storage (TTL/лимит) -> Queue -> Telegram
+annotate JPEG -> AES-GCM -> storage (TTL/лимит) -> outbox/retry -> Telegram
 ```
 
 Инварианты:
 
 - Настройки: `Settings` (env) + `Runtime` (чат поверх env).
 - Кадры и embeddings только зашифрованными (AES-256-GCM).
-- SQLite без ORM, WAL, prune по `events_max` и `events_ttl_days`.
+- SQLite без ORM, WAL, индексы и периодический prune по `events_max` и `events_ttl_days`.
+- Сетевые URL проходят allowlist; production не допускает open access и небезопасный TLS.
+- Уведомление сначала фиксируется в outbox, поэтому временный сбой Telegram не теряет событие.
 - Событие на появление/исчезновение трека, кулдаун гасит дребезг.
 - Превью не вызывает второй `VideoCapture.read()`.
 - Детектор деградирует yolo -> yunet -> motion; remote падает в fallback, а не в «никого нет».

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from doteye.storage import Storage
 
@@ -96,4 +97,25 @@ def test_wal_enabled(tmp_path: Path) -> None:
     st = make_storage(tmp_path)
     mode = st._conn.execute("PRAGMA journal_mode").fetchone()[0]
     assert str(mode).lower() == "wal"
+    st.close()
+
+
+def test_notification_outbox_is_durable_and_idempotent(tmp_path: Path) -> None:
+    st = make_storage(tmp_path)
+    event_id = st.add_event(None, b"frame")
+    first = st.enqueue_notification("event:1:42", event_id, 42, "alert", b"jpeg")
+    assert st.enqueue_notification("event:1:42", event_id, 42, "alert", b"jpeg") == first
+    due = st.claim_due_notifications(limit=10)
+    assert len(due) == 1
+    assert due[0]["event_id"] == event_id
+    assert due[0]["jpeg"] == b"jpeg"
+
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    st.retry_notification(first, later, "temporary error")
+    assert st.claim_due_notifications(limit=10) == []
+    due = st.claim_due_notifications(now=(datetime.now(timezone.utc) + timedelta(hours=2)).isoformat())
+    assert due[0]["attempts"] == 1
+    assert due[0]["last_error"] == "temporary error"
+    st.mark_notification_sent(first)
+    assert st.claim_due_notifications(now=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat()) == []
     st.close()

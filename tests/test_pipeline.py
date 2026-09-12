@@ -70,6 +70,16 @@ class FakeRecognizer(Recognizer):
         return self._distance
 
 
+class CountingRecognizer(FakeRecognizer):
+    def __init__(self, distance: float) -> None:
+        super().__init__(None, distance)
+        self.embed_calls = 0
+
+    def embed(self, frame: np.ndarray) -> bytes:
+        self.embed_calls += 1
+        return b"probe"
+
+
 def make_settings(**over: object) -> Settings:
     base = {
         "detect_mode": "presence",
@@ -173,6 +183,35 @@ def test_identity_min_distance_across_embeddings(tmp_path: Path) -> None:
     assert events[0].person_name == "alice"
 
 
+def test_identity_unknown_track_is_rate_limited(tmp_path: Path) -> None:
+    recognizer = CountingRecognizer(0.9)
+    pipe = build(tmp_path, recognizer=recognizer, detect_mode="identity")
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    pipe.step()
+    pipe.step()
+    assert recognizer.embed_calls == 1
+
+
+def test_identity_reference_cache_invalidates_after_embedding_change(tmp_path: Path) -> None:
+    recognizer = CountingRecognizer(0.9)
+    pipe = build(tmp_path, recognizer=recognizer, detect_mode="identity")
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    calls = 0
+    original = pipe._crypto.decrypt
+
+    def count_decrypt(value: bytes) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    pipe._crypto.decrypt = count_decrypt  # type: ignore[method-assign]
+    pipe.step()
+    pipe._storage.upsert_person("bob", pipe._crypto.encrypt(b"ref2"))
+    pipe._detector = TwoBoxDetector()  # type: ignore[assignment]
+    pipe.step()
+    assert calls == 3
+
+
 def test_model_change_triggers_rebuild(tmp_path: Path, monkeypatch) -> None:
     pipe = build(tmp_path)
     calls: list[tuple] = []
@@ -274,19 +313,47 @@ def test_zone_filters_box(tmp_path: Path) -> None:
     assert pipe.step() == []
 
 
-def test_enqueue_drops_oldest() -> None:
-    import asyncio
+def test_identity_unknown_raises_voice_alarm(tmp_path: Path) -> None:
+    from doteye.audio import DummyPlayer
+    from doteye.tts import DummyTTS
+    from doteye.voice import build_voice
 
-    from doteye.main import _enqueue
-    from doteye.pipeline import DetectionEvent
+    pipe = build(
+        tmp_path,
+        recognizer=FakeRecognizer("alice", 0.9),
+        detect_mode="identity",
+        face_threshold=0.4,
+    )
+    tts = DummyTTS()
+    voice = build_voice(pipe._runtime, tts, DummyPlayer(), start_worker=False)
+    pipe.set_voice(voice)
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    events = pipe.step()
+    assert voice.alarming
+    assert any(event.event_type == "alarm" for event in events)
+    voice.drain()
+    assert any("незнакомец" in text.casefold() for text in tts.texts)
 
-    q: asyncio.Queue = asyncio.Queue(maxsize=2)
-    a = DetectionEvent("a", 0, b"x", 1.0)
-    b = DetectionEvent("b", 0, b"x", 2.0)
-    c = DetectionEvent("c", 0, b"x", 3.0)
-    _enqueue(q, a)
-    _enqueue(q, b)
-    _enqueue(q, c)
-    assert q.qsize() == 2
-    first = q.get_nowait()
-    assert first.person_name == "b"
+
+def test_late_identify_clears_voice_alarm(tmp_path: Path) -> None:
+    from doteye.audio import DummyPlayer
+    from doteye.tts import DummyTTS
+    from doteye.voice import build_voice
+
+    rec = FakeRecognizer("alice", 0.9)
+    pipe = build(
+        tmp_path,
+        recognizer=rec,
+        detect_mode="identity",
+        face_threshold=0.4,
+        cooldown_seconds=0.0,
+    )
+    voice = build_voice(pipe._runtime, DummyTTS(), DummyPlayer(), start_worker=False)
+    pipe.set_voice(voice)
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    pipe.step()
+    assert voice.alarming
+    rec._distance = 0.1
+    events = pipe.step()
+    assert voice.alarming is False
+    assert any(event.event_type == "alarm_cleared" for event in events)

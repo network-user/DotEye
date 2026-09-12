@@ -27,6 +27,8 @@ GPU (NVIDIA): раскомментируй `deploy.resources` в `docker-compose
 
 ### Remote-инференс через Compose
 
+Remote-порт остаётся на loopback. Для камеры на другой машине используй VPN или TLS reverse proxy: прямой HTTP-порт не публикуй в сеть.
+
 На сервере с GPU:
 
 ```bash
@@ -38,14 +40,15 @@ curl http://localhost:8099/health          # {"status": "ok"}
 
 ```
 DOTEYE_REMOTE_PROCESSING=1
-DOTEYE_REMOTE_URL=http://<server-ip>:8099
+DOTEYE_REMOTE_URL=https://<remote-host>
+DOTEYE_ALLOWED_URL_HOSTS=<remote-host>
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```
 
 Без Docker remote-сервер поднимается так:
 
 ```bash
-python -m doteye.remote_server --host 0.0.0.0 --port 8099 --model yolov8n.pt --device cuda
+python -m doteye.remote_server --host 127.0.0.1 --port 8099 --model yolov8n.pt --device cuda
 ```
 
 ## 2. systemd (Linux, без Docker)

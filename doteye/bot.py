@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -26,12 +28,13 @@ from aiogram.types import (
 
 from doteye import models
 from doteye.annotate import crop_box
-from doteye.config import Settings
+from doteye.config import ConfigurationError, Settings
 from doteye.crypto import Crypto
 from doteye.pipeline import Pipeline
 from doteye.recognizer import Recognizer
 from doteye.runtime import Runtime
 from doteye.storage import Storage
+from doteye.voice import CLEAR_ON_VALUES, DEFAULT_PHRASES, PHRASE_TITLES, VoiceEngine
 from doteye.zones import Zone, dump_zones, parse_zones
 
 HELP = (
@@ -49,6 +52,8 @@ HELP = (
     "/add - добавить человека (имя + фото)\n"
     "/remove - удалить человека\n"
     "/events - последние события\n"
+    "/say - сказать вслух через динамики\n"
+    "/alarm - ручная тревога /alarm off снять\n"
     "/cancel - отменить текущий ввод\n"
     "/help - эта справка"
 )
@@ -56,6 +61,9 @@ HELP = (
 DETECTORS = ["auto", "yolo", "yunet", "motion"]
 DEVICES = ["cpu", "cuda", "mps"]
 EVENTS_PAGE = 3
+OUTBOX_POLL_SECONDS = 1.0
+OUTBOX_BATCH_SIZE = 20
+OUTBOX_MAX_RETRY_SECONDS = 3600
 
 
 class CameraForm(StatesGroup):
@@ -124,13 +132,14 @@ class AccessMiddleware(BaseMiddleware):
 
     def __init__(self, settings: Settings, storage: Storage, runtime: Runtime,
                  crypto: Crypto | None, recognizer: Recognizer | None,
-                 pipeline: Pipeline | None) -> None:
+                 pipeline: Pipeline | None, voice: VoiceEngine | None = None) -> None:
         self._settings = settings
         self._storage = storage
         self._runtime = runtime
         self._crypto = crypto
         self._recognizer = recognizer
         self._pipeline = pipeline
+        self._voice = voice
 
     async def __call__(
         self,
@@ -144,6 +153,7 @@ class AccessMiddleware(BaseMiddleware):
         data["crypto"] = self._crypto
         data["recognizer"] = self._recognizer
         data["pipeline"] = self._pipeline
+        data["voice"] = self._voice
 
         if isinstance(event, Message) and not _is_admin(event, self._settings):
             await event.answer("Нет доступа.")
@@ -159,13 +169,28 @@ class AccessMiddleware(BaseMiddleware):
 router = Router()
 
 
-def _panel_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+def _on(flag: bool) -> str:
+    return "вкл" if flag else "выкл"
+
+
+def _short_phrase(text: str, limit: int = 36) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> InlineKeyboardMarkup:
     mode_next = "identity" if runtime.detect_mode == "presence" else "presence"
     det_next = _next_item(DETECTORS, runtime.detector_backend)
-    arm = "вкл" if runtime.armed else "выкл"
+    arm = _on(runtime.armed)
     quiet = runtime.quiet_hours or "выкл"
-    exit_s = "вкл" if runtime.notify_exit else "выкл"
-    remote = "вкл" if runtime.remote_processing else "выкл"
+    exit_s = _on(runtime.notify_exit)
+    remote = _on(runtime.remote_processing)
+    if voice is not None and voice.alarming:
+        voice_s = "ТРЕВОГА"
+    else:
+        voice_s = _on(runtime.voice_enabled)
     rows = [
         [
             InlineKeyboardButton(text=f"Охрана: {arm}", callback_data="panel:arm"),
@@ -223,6 +248,9 @@ def _panel_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="Зоны", callback_data="panel:zones"),
             InlineKeyboardButton(text="Статус", callback_data="panel:status"),
+        ],
+        [
+            InlineKeyboardButton(text=f"Голос / тревога: {voice_s}", callback_data="voice:open"),
         ],
         [InlineKeyboardButton(text="Справка", callback_data="panel:help")],
     ]
@@ -306,8 +334,177 @@ def _zones_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+_CLEAR_ON_LABELS = {
+    "both": "свой или уход",
+    "known": "только свой",
+    "exit": "уход незнакомца",
+}
+
+
+def _voice_text(runtime: Runtime, voice: VoiceEngine | None) -> str:
+    alarm = "ТРЕВОГА" if (voice is not None and voice.alarming) else "тихо"
+    backend = voice.backend if voice is not None else "нет"
+    last = f"\nПоследняя фраза: {voice.last_phrase}" if voice and voice.last_phrase else ""
+    err = f"\nОшибка: {voice.last_error}" if voice and voice.last_error else ""
+    return (
+        "Голос и тревога.\n"
+        "Незнакомец в режиме identity: сирена и фраза из динамиков. "
+        "Если в кадре появляется человек из списка, тревога снимается. "
+        "«Сказать вслух» работает всегда, даже при выключенных авто-фразах.\n\n"
+        f"Состояние: {alarm}\n"
+        f"Движок: {backend}\n"
+        f"Авто: {_on(runtime.voice_enabled)}, "
+        f"тревога {_on(runtime.voice_alarm_enabled)}, "
+        f"сирена {_on(runtime.voice_siren_enabled)}, "
+        f"речь {_on(runtime.voice_speech_enabled)}\n"
+        f"Снятие: {_CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on)}"
+        f"{last}{err}"
+    )
+
+
+def _voice_keyboard(runtime: Runtime, voice: VoiceEngine | None) -> InlineKeyboardMarkup:
+    alarming = voice is not None and voice.alarming
+    vol = int(round(runtime.voice_volume * 100))
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"Авто: {_on(runtime.voice_enabled)}",
+                callback_data="voice:tog:voice_enabled",
+            ),
+            InlineKeyboardButton(
+                text=f"Тревога: {_on(runtime.voice_alarm_enabled)}",
+                callback_data="voice:tog:voice_alarm_enabled",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Сирена: {_on(runtime.voice_siren_enabled)}",
+                callback_data="voice:tog:voice_siren_enabled",
+            ),
+            InlineKeyboardButton(
+                text=f"Речь: {_on(runtime.voice_speech_enabled)}",
+                callback_data="voice:tog:voice_speech_enabled",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Привет: {_on(runtime.voice_welcome)}",
+                callback_data="voice:tog:voice_welcome",
+            ),
+            InlineKeyboardButton(
+                text=f"Пока: {_on(runtime.voice_goodbye)}",
+                callback_data="voice:tog:voice_goodbye",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Присутствие: {_on(runtime.voice_presence)}",
+                callback_data="voice:tog:voice_presence",
+            ),
+            InlineKeyboardButton(
+                text=f"Охрана голосом: {_on(runtime.voice_armed_announce)}",
+                callback_data="voice:tog:voice_armed_announce",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Тревога в presence: {_on(runtime.voice_alarm_on_presence)}",
+                callback_data="voice:tog:voice_alarm_on_presence",
+            ),
+            InlineKeyboardButton(
+                text=f"Глушить в тихие: {_on(runtime.voice_mute_quiet)}",
+                callback_data="voice:tog:voice_mute_quiet",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Снятие: {_CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on)}",
+                callback_data="voice:clear_on",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Повтор {runtime.voice_repeat_seconds:g}с",
+                callback_data="voice:num:voice_repeat_seconds",
+            ),
+            InlineKeyboardButton(
+                text=f"Таймаут {runtime.voice_timeout_seconds:g}с",
+                callback_data="voice:num:voice_timeout_seconds",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Пауза ухода {runtime.voice_grace_seconds:g}с",
+                callback_data="voice:num:voice_grace_seconds",
+            ),
+            InlineKeyboardButton(
+                text=f"Кулдаун {runtime.voice_cooldown_seconds:g}с",
+                callback_data="voice:num:voice_cooldown_seconds",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text=f"Громкость {vol}%", callback_data="voice:num:voice_volume_pct"),
+            InlineKeyboardButton(
+                text=f"Скорость {runtime.voice_rate:g}",
+                callback_data="voice:num:voice_rate",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text="Фразы", callback_data="voice:phrases"),
+            InlineKeyboardButton(text="Голоса TTS", callback_data="voice:voices"),
+        ],
+        [
+            InlineKeyboardButton(text="Сказать вслух", callback_data="voice:say"),
+            InlineKeyboardButton(text="Тест сирены", callback_data="voice:test"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Снять тревогу" if alarming else "Тревога вручную",
+                callback_data="voice:dismiss" if alarming else "voice:trigger",
+            ),
+        ],
+        [InlineKeyboardButton(text="Назад", callback_data="panel:open")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _phrase_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, title in PHRASE_TITLES.items():
+        preview = _short_phrase(runtime.voice_phrase(key))
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{title}: {preview}",
+                callback_data=f"voice:ph:{key}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="voice:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _voices_keyboard(
+    runtime: Runtime, voices: list[tuple[str, str]]
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current = runtime.voice_tts_voice
+    for i, (vid, title) in enumerate(voices[:15]):
+        mark = " [текущий]" if vid == current else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{_short_phrase(title, 48)}{mark}",
+                callback_data=f"voice:vset:{i}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(text="Сбросить голос", callback_data="voice:vset:-1")
+    ])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="voice:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _status_text(runtime: Runtime, recognizer: Recognizer | None,
-                 pipeline: Pipeline | None) -> str:
+                 pipeline: Pipeline | None,
+                 voice: VoiceEngine | None = None) -> str:
     face = _face(recognizer, pipeline)
     face_s = "on" if face is not None and face.available() else "off/dummy"
     remote = "on" if runtime.remote_processing else "off"
@@ -332,7 +529,15 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
         f"Распознавание: {face_s}",
         f"Remote: {remote} ({runtime.remote_url or 'нет URL'})",
         f"Уведомлять выход: {'да' if runtime.notify_exit else 'нет'}",
+        f"Голос: {_on(runtime.voice_enabled)}, тревога {_on(runtime.voice_alarm_enabled)}",
+        f"Сирена: {_on(runtime.voice_siren_enabled)}, речь {_on(runtime.voice_speech_enabled)}",
+        f"Привет/пока: {_on(runtime.voice_welcome)}/{_on(runtime.voice_goodbye)}",
     ]
+    engine = voice if voice is not None else (
+        pipeline.voice if pipeline is not None else None
+    )
+    if engine is not None and pipeline is None:
+        lines.append(engine.status_line())
     if pipeline is not None:
         lines.append("")
         lines.append(pipeline.health_text())
@@ -453,8 +658,11 @@ async def cmd_start(message: Message, settings: Settings) -> None:
 
 
 @router.message(Command("panel"))
-async def cmd_panel(message: Message, runtime: Runtime) -> None:
-    await message.answer("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+async def cmd_panel(message: Message, runtime: Runtime,
+                    voice: VoiceEngine | None = None) -> None:
+    await message.answer(
+        "Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime, voice)
+    )
 
 
 @router.message(Command("help"))
@@ -475,37 +683,48 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("status"))
 async def cmd_status(message: Message, runtime: Runtime,
-                     recognizer: Recognizer | None, pipeline: Pipeline | None) -> None:
-    await message.answer(_status_text(runtime, recognizer, pipeline))
+                     recognizer: Recognizer | None, pipeline: Pipeline | None,
+                     voice: VoiceEngine | None = None) -> None:
+    await message.answer(_status_text(runtime, recognizer, pipeline, voice))
 
 
 @router.callback_query(F.data == "panel:open")
-async def cb_open(cq: CallbackQuery, runtime: Runtime) -> None:
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+async def cb_open(cq: CallbackQuery, runtime: Runtime,
+                  voice: VoiceEngine | None = None) -> None:
+    await cq.message.edit_text(
+        "Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime, voice)
+    )
     await cq.answer()
 
 
 @router.callback_query(F.data == "panel:status")
 async def cb_status(cq: CallbackQuery, runtime: Runtime,
-                    recognizer: Recognizer | None, pipeline: Pipeline | None) -> None:
+                    recognizer: Recognizer | None, pipeline: Pipeline | None,
+                    voice: VoiceEngine | None = None) -> None:
     await cq.message.edit_text(
-        _status_text(runtime, recognizer, pipeline), reply_markup=_back_kb()
+        _status_text(runtime, recognizer, pipeline, voice), reply_markup=_back_kb()
     )
     await cq.answer()
 
 
 @router.callback_query(F.data == "panel:health")
 async def cb_health(cq: CallbackQuery, pipeline: Pipeline | None, runtime: Runtime,
-                    recognizer: Recognizer | None) -> None:
-    text = _status_text(runtime, recognizer, pipeline)
+                    recognizer: Recognizer | None,
+                    voice: VoiceEngine | None = None) -> None:
+    text = _status_text(runtime, recognizer, pipeline, voice)
     await cq.message.edit_text(text, reply_markup=_back_kb())
     await cq.answer()
 
 
 @router.callback_query(F.data == "panel:arm")
-async def cb_arm(cq: CallbackQuery, runtime: Runtime) -> None:
+async def cb_arm(cq: CallbackQuery, runtime: Runtime,
+                 voice: VoiceEngine | None = None) -> None:
     runtime.armed = not runtime.armed
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    if voice is not None:
+        voice.sync_armed(runtime.armed)
+    await cq.message.edit_text(
+        "Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime, voice)
+    )
     await cq.answer("Охрана вкл" if runtime.armed else "Охрана выкл")
 
 
@@ -689,6 +908,196 @@ async def cb_event_new(cq: CallbackQuery, state: FSMContext) -> None:
 async def cb_help(cq: CallbackQuery) -> None:
     await cq.message.answer(HELP)
     await cq.answer()
+
+
+async def _edit_voice_panel(
+    cq: CallbackQuery, runtime: Runtime, voice: VoiceEngine | None,
+) -> None:
+    await cq.message.edit_text(
+        _voice_text(runtime, voice),
+        reply_markup=_voice_keyboard(runtime, voice),
+    )
+
+
+@router.callback_query(F.data == "voice:open")
+async def cb_voice_open(cq: CallbackQuery, runtime: Runtime,
+                        voice: VoiceEngine | None = None) -> None:
+    await _edit_voice_panel(cq, runtime, voice)
+    await cq.answer()
+
+
+_VOICE_TOGGLES = {
+    "voice_enabled",
+    "voice_alarm_enabled",
+    "voice_siren_enabled",
+    "voice_speech_enabled",
+    "voice_welcome",
+    "voice_goodbye",
+    "voice_presence",
+    "voice_armed_announce",
+    "voice_alarm_on_presence",
+    "voice_mute_quiet",
+}
+
+_VOICE_NUM_FIELDS = {
+    "voice_repeat_seconds": (2.0, 3600.0, "Повтор тревоги, сек (минимум 2):"),
+    "voice_timeout_seconds": (0.0, 86400.0, "Таймаут тревоги, сек (0 = пока не снимут):"),
+    "voice_grace_seconds": (0.0, 3600.0, "Пауза после ухода незнакомца, сек:"),
+    "voice_cooldown_seconds": (0.0, 86400.0, "Кулдаун приветствия/прощания, сек:"),
+    "voice_rate": (0.4, 2.5, "Скорость речи 0.4..2.5:"),
+    "voice_volume_pct": (0.0, 100.0, "Громкость 0..100:"),
+}
+
+
+@router.callback_query(F.data.startswith("voice:tog:"))
+async def cb_voice_toggle(cq: CallbackQuery, runtime: Runtime,
+                          voice: VoiceEngine | None = None) -> None:
+    field = cq.data.split(":", 2)[2]
+    if field not in _VOICE_TOGGLES:
+        await cq.answer("Неизвестная настройка", show_alert=True)
+        return
+    setattr(runtime, field, not bool(getattr(runtime, field)))
+    await _edit_voice_panel(cq, runtime, voice)
+    await cq.answer(f"{field}: {_on(bool(getattr(runtime, field)))}")
+
+
+@router.callback_query(F.data == "voice:clear_on")
+async def cb_voice_clear_on(cq: CallbackQuery, runtime: Runtime,
+                            voice: VoiceEngine | None = None) -> None:
+    runtime.voice_clear_on = _next_item(list(CLEAR_ON_VALUES), runtime.voice_clear_on)
+    await _edit_voice_panel(cq, runtime, voice)
+    await cq.answer("Снятие: " + _CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on))
+
+
+@router.callback_query(F.data.startswith("voice:num:"))
+async def cb_voice_number(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    field = cq.data.split(":", 2)[2]
+    spec = _VOICE_NUM_FIELDS.get(field)
+    if spec is None:
+        await cq.answer("Неизвестное поле", show_alert=True)
+        return
+    lo, hi, prompt = spec
+    await state.set_state(NumberForm.value)
+    await state.update_data(field=field, lo=lo, hi=hi)
+    current = runtime.voice_volume * 100 if field == "voice_volume_pct" else getattr(runtime, field)
+    await cq.message.answer(f"{prompt}\nСейчас: {current:g}")
+    await cq.answer()
+
+
+@router.callback_query(F.data == "voice:phrases")
+async def cb_voice_phrases(cq: CallbackQuery, runtime: Runtime) -> None:
+    await cq.message.edit_text(
+        "Фразы. Нажми чтобы заменить. Плейсхолдер {name} подставляет имя.",
+        reply_markup=_phrase_keyboard(runtime),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("voice:ph:"))
+async def cb_voice_phrase_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    key = cq.data.split(":", 2)[2]
+    if key not in DEFAULT_PHRASES:
+        await cq.answer("Неизвестная фраза", show_alert=True)
+        return
+    await state.set_state(TextForm.value)
+    await state.update_data(kind=f"phrase:{key}")
+    title = PHRASE_TITLES.get(key, key)
+    await cq.message.answer(
+        f"{title}. Сейчас:\n{runtime.voice_phrase(key)}\n\n"
+        "Пришли новый текст (или «отмена»)."
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "voice:voices")
+async def cb_voice_voices(cq: CallbackQuery, runtime: Runtime,
+                          voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await cq.answer("Голосовой движок не создан", show_alert=True)
+        return
+    voices = await asyncio.to_thread(voice.list_voices)
+    if not voices:
+        await cq.message.edit_text(
+            "TTS-голоса не найдены. На Windows нужен голосовой пакет "
+            "(например Ирина), на Linux - espeak-ng.",
+            reply_markup=_voices_keyboard(runtime, []),
+        )
+        await cq.answer()
+        return
+    await cq.message.edit_text(
+        "Голос синтезатора:",
+        reply_markup=_voices_keyboard(runtime, voices),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("voice:vset:"))
+async def cb_voice_voice_set(cq: CallbackQuery, runtime: Runtime,
+                             voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await cq.answer("Голосовой движок не создан", show_alert=True)
+        return
+    idx = int(cq.data.split(":")[2])
+    if idx < 0:
+        runtime.voice_tts_voice = ""
+        await _edit_voice_panel(cq, runtime, voice)
+        await cq.answer("Голос сброшен")
+        return
+    voices = await asyncio.to_thread(voice.list_voices)
+    if idx >= len(voices):
+        await cq.answer("Голос не найден", show_alert=True)
+        return
+    runtime.voice_tts_voice = voices[idx][0]
+    await cq.message.edit_text(
+        f"Голос: {voices[idx][1]}",
+        reply_markup=_voices_keyboard(runtime, voices),
+    )
+    await cq.answer("Сохранено")
+
+
+@router.callback_query(F.data == "voice:say")
+async def cb_voice_say(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TextForm.value)
+    await state.update_data(kind="say")
+    await cq.message.answer(
+        "Текст для озвучки, например «Отойди от двери». «отмена» - выйти."
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "voice:test")
+async def cb_voice_test(cq: CallbackQuery, voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await cq.answer("Голосовой движок не создан", show_alert=True)
+        return
+    voice.test_alarm()
+    await cq.answer("Тест: сирена и фраза")
+
+
+@router.callback_query(F.data == "voice:trigger")
+async def cb_voice_trigger(cq: CallbackQuery, runtime: Runtime,
+                           voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await cq.answer("Голосовой движок не создан", show_alert=True)
+        return
+    voice.trigger_alarm()
+    await _edit_voice_panel(cq, runtime, voice)
+    await cq.answer("Тревога запущена")
+
+
+@router.callback_query(F.data == "voice:dismiss")
+async def cb_voice_dismiss(cq: CallbackQuery, runtime: Runtime,
+                           voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await cq.answer("Голосовой движок не создан", show_alert=True)
+        return
+    notice = voice.dismiss("manual")
+    if cq.message:
+        try:
+            await _edit_voice_panel(cq, runtime, voice)
+        except Exception:
+            pass
+    await cq.answer("Тревога снята" if notice else "Тревоги не было")
 
 
 @router.callback_query(F.data == "panel:camera")
@@ -886,7 +1295,11 @@ async def proc_camera_source(message: Message, state: FSMContext, runtime: Runti
         await state.clear()
         await message.answer("Отменено.")
         return
-    runtime.camera_source = (message.text or "0").strip()
+    try:
+        runtime.camera_source = (message.text or "0").strip()
+    except ConfigurationError as exc:
+        await message.answer(f"Источник отклонён: {exc}")
+        return
     await state.clear()
     await message.answer(f"Источник задан: {runtime.camera_source}")
 
@@ -951,16 +1364,21 @@ async def proc_number(message: Message, state: FSMContext, runtime: Runtime) -> 
     lo = float(data.get("lo", 0.0))
     hi = float(data.get("hi", 1.0))
     value = max(lo, min(hi, value))
-    setattr(runtime, field, value)
+    if field == "voice_volume_pct":
+        runtime.voice_volume = value / 100.0
+        shown = f"voice_volume = {runtime.voice_volume:g}"
+    else:
+        setattr(runtime, field, value)
+        shown = f"{field} = {value}"
     await state.clear()
-    await message.answer(f"{field} = {value}")
+    await message.answer(shown)
 
 
 @router.message(TextForm.value)
 async def proc_text(
     message: Message, state: FSMContext, runtime: Runtime,
     storage: Storage, crypto: Crypto | None, recognizer: Recognizer | None,
-    pipeline: Pipeline | None,
+    pipeline: Pipeline | None, voice: VoiceEngine | None = None,
 ) -> None:
     if _cancel_requested(message):
         await state.clear()
@@ -974,13 +1392,21 @@ async def proc_text(
             runtime.quiet_hours = ""
             await message.answer("Тихие часы выключены.")
         else:
-            runtime.quiet_hours = text
+            try:
+                runtime.quiet_hours = text
+            except ConfigurationError as exc:
+                await message.answer(f"Тихие часы отклонены: {exc}")
+                return
             await message.answer(f"Тихие часы: {text}")
         await state.clear()
         return
     if kind == "remote_url":
-        runtime.remote_url = text
-        runtime.remote_processing = True
+        try:
+            runtime.remote_url = text
+            runtime.remote_processing = True
+        except ConfigurationError as exc:
+            await message.answer(f"Remote URL отклонён: {exc}")
+            return
         await state.clear()
         await message.answer(f"Remote: {text}")
         return
@@ -1013,6 +1439,31 @@ async def proc_text(
         msg = _assign_event(event_id, pid, storage, crypto, _face(recognizer, pipeline))
         await state.clear()
         await message.answer(msg)
+        return
+    if kind == "say":
+        if voice is None:
+            await state.clear()
+            await message.answer("Голосовой движок не создан.")
+            return
+        if not voice.announce(text):
+            await message.answer("Пустой текст.")
+            return
+        await state.clear()
+        await message.answer(f"Озвучиваю: {text}")
+        return
+    if isinstance(kind, str) and kind.startswith("phrase:"):
+        key = kind.split(":", 1)[1]
+        try:
+            runtime.set_voice_phrase(key, text)
+        except ConfigurationError as exc:
+            await message.answer(f"Фраза отклонена: {exc}")
+            return
+        await state.clear()
+        title = PHRASE_TITLES.get(key, key)
+        await message.answer(
+            f"{title} сохранена.",
+            reply_markup=_phrase_keyboard(runtime),
+        )
         return
     await state.clear()
     await message.answer("Не понял ввод.")
@@ -1146,6 +1597,40 @@ async def cmd_events(
     await _send_events_page(message, storage, crypto, runtime, 0)
 
 
+@router.message(Command("say"))
+async def cmd_say(message: Message, command: Command, state: FSMContext,
+                  voice: VoiceEngine | None = None) -> None:
+    text = (command.args or "").strip()
+    if not text:
+        await state.set_state(TextForm.value)
+        await state.update_data(kind="say")
+        await message.answer("Текст для озвучки (или «отмена»):")
+        return
+    if voice is None:
+        await message.answer("Голосовой движок не создан.")
+        return
+    if not voice.announce(text):
+        await message.answer("Пустой текст.")
+        return
+    await message.answer(f"Озвучиваю: {text}")
+
+
+@router.message(Command("alarm"))
+async def cmd_alarm(message: Message, command: Command,
+                    voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await message.answer("Голосовой движок не создан.")
+        return
+    arg = (command.args or "").strip().lower()
+    if arg in ("off", "stop", "0", "выкл", "снять"):
+        notice = voice.dismiss("manual")
+        await message.answer("Тревога снята." if notice else "Тревоги не было.")
+        return
+    phrase = (command.args or "").strip() or None
+    voice.trigger_alarm(phrase)
+    await message.answer("Тревога запущена.")
+
+
 @router.message()
 async def fallback(message: Message) -> None:
     await message.answer("Не понял. /help - список команд. /cancel - отменить ввод.")
@@ -1158,13 +1643,16 @@ async def run_bot(
     crypto: Crypto | None,
     recognizer: Recognizer | None,
     pipeline: Pipeline | None,
+    voice: VoiceEngine | None = None,
 ) -> None:
     if not settings.has_token:
         raise RuntimeError("DOTEYE_BOT_TOKEN не задан")
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
-    di = AccessMiddleware(settings, storage, runtime, crypto, recognizer, pipeline)
+    di = AccessMiddleware(
+        settings, storage, runtime, crypto, recognizer, pipeline, voice
+    )
     dp.message.middleware(di)
     dp.callback_query.middleware(di)
     dp.include_router(router)
@@ -1194,41 +1682,119 @@ async def notify_startup(
         await bot.session.close()
 
 
-async def send_notifications(
-    settings: Settings, events: "asyncio.Queue[Any]"
+def queue_notifications(
+    settings: Settings, storage: Storage, crypto: Crypto, event: Any,
 ) -> None:
-    """Разослать события админам: фото + подпись, у неизвестных кнопка «Это кто?»."""
+    """Сохранить доставки каждому админу до обращения к Telegram API.
+
+    Запись в SQLite происходит раньше отправки, поэтому рестарт процесса и
+    временная ошибка Telegram не теряют срабатывание камеры.
+    """
+    if not settings.has_admins:
+        return
+    caption = event.caption or (
+        f"DotEye: {event.person_name or 'неизвестный'}"
+        + (f" ({event.confidence:.2f})" if event.confidence else "")
+    )
+    unknown_enter = bool(
+        event.event_id
+        and event.person_name is None
+        and event.event_type == "enter"
+        and event.jpeg
+    )
+    show_dismiss = unknown_enter or event.event_type == "alarm"
+    payload = json.dumps(
+        {
+            "caption": caption,
+            "event_id": event.event_id,
+            "unknown_enter": unknown_enter,
+            "show_dismiss": show_dismiss,
+            "jpeg_encrypted": bool(event.jpeg),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if event.event_id is not None:
+        event_key = f"event:{event.event_id}"
+    else:
+        # Alert не имеет event_id. Хеш создаёт одинаковый ключ только для
+        # одного и того же срабатывания в пределах временной метки pipeline.
+        digest = hashlib.sha256(
+            f"{event.event_type}\0{caption}\0{event.detected_at:.6f}".encode()
+        ).hexdigest()
+        event_key = f"alert:{digest}"
+    for admin_id in settings.admin_ids:
+        storage.enqueue_notification(
+            f"{event_key}:admin:{admin_id}",
+            event.event_id,
+            admin_id,
+            payload,
+            crypto.encrypt(event.jpeg) if event.jpeg else None,
+        )
+
+
+def _retry_at(attempts: int) -> str:
+    """Экспоненциальная задержка 1s..1h без зависимости от event loop."""
+    seconds = min(OUTBOX_MAX_RETRY_SECONDS, 2 ** min(max(0, attempts), 12))
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+async def send_notifications(
+    settings: Settings,
+    storage: Storage,
+    crypto: Crypto | None,
+    *,
+    poll_seconds: float = OUTBOX_POLL_SECONDS,
+) -> None:
+    """Доставлять сохранённые уведомления с повтором после ошибок Telegram."""
     if not settings.has_admins:
         return
     bot = Bot(token=settings.bot_token)
     try:
         while True:
-            event = await events.get()
-            caption = event.caption or (
-                f"DotEye: {event.person_name or 'неизвестный'}"
-                + (f" ({event.confidence:.2f})" if event.confidence else "")
-            )
-            markup = None
-            if (
-                event.event_id
-                and event.person_name is None
-                and event.event_type == "enter"
-                and event.jpeg
-            ):
-                markup = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Это кто?",
-                        callback_data=f"event:who:{event.event_id}",
-                    )
-                ]])
-            for admin in settings.admin_ids:
+            rows = storage.claim_due_notifications(limit=OUTBOX_BATCH_SIZE)
+            if not rows:
+                await asyncio.sleep(poll_seconds)
+                continue
+            for row in rows:
                 try:
-                    if event.jpeg:
-                        photo = BufferedInputFile(event.jpeg, filename="event.jpg")
-                        await bot.send_photo(admin, photo, caption=caption, reply_markup=markup)
+                    payload = json.loads(str(row["payload"]))
+                    caption = str(payload["caption"])
+                    event_id = payload.get("event_id")
+                    markup = None
+                    rows: list[list[InlineKeyboardButton]] = []
+                    if payload.get("unknown_enter") and isinstance(event_id, int):
+                        rows.append([
+                            InlineKeyboardButton(
+                                text="Это кто?",
+                                callback_data=f"event:who:{event_id}",
+                            )
+                        ])
+                    if payload.get("show_dismiss"):
+                        rows.append([
+                            InlineKeyboardButton(
+                                text="Снять тревогу",
+                                callback_data="voice:dismiss",
+                            )
+                        ])
+                    if rows:
+                        markup = InlineKeyboardMarkup(inline_keyboard=rows)
+                    jpeg = row["jpeg"]
+                    if jpeg:
+                        if crypto is None:
+                            raise RuntimeError("crypto недоступен для уведомления с фото")
+                        if not payload.get("jpeg_encrypted"):
+                            raise RuntimeError("outbox содержит незашифрованное фото")
+                        photo = BufferedInputFile(crypto.decrypt(bytes(jpeg)), filename="event.jpg")
+                        await bot.send_photo(int(row["admin_id"]), photo, caption=caption, reply_markup=markup)
                     else:
-                        await bot.send_message(admin, caption)
+                        await bot.send_message(int(row["admin_id"]), caption, reply_markup=markup)
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[notify] admin {admin}: {exc}")
+                    storage.retry_notification(
+                        int(row["id"]), _retry_at(int(row["attempts"])), str(exc),
+                    )
+                    print(f"[notify] admin {row['admin_id']}: {exc}")
+                else:
+                    storage.mark_notification_sent(int(row["id"]))
     finally:
         await bot.session.close()

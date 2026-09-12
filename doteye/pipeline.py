@@ -21,6 +21,7 @@ from doteye.recognizer import Recognizer, build_recognizer
 from doteye.runtime import Runtime
 from doteye.storage import Storage
 from doteye.tracker import Box, IoUTracker, Track
+from doteye.voice import VoiceEngine, VoiceScene, VoiceTrack
 from doteye.zones import filter_boxes, parse_zones
 
 
@@ -91,7 +92,22 @@ class Pipeline:
         self._steps = 0
         self._remote_down = False
         self._poll_override: float | None = None
+        self._identity_cache_revision = -1
+        self._identity_references: list[tuple[str, bytes]] = []
+        self._identity_attempts: dict[tuple[str, int], tuple[float, int]] = {}
+        self._last_prune_at = time.monotonic()
+        self._voice: VoiceEngine | None = None
         self.use_motion_gate = True
+
+    def set_voice(self, voice: VoiceEngine | None) -> None:
+        self._voice = voice
+
+    @property
+    def voice(self) -> VoiceEngine | None:
+        return self._voice
+
+    def _voice_alarming(self) -> bool:
+        return self._voice is not None and self._voice.alarming
 
     def start(self) -> None:
         self._running = True
@@ -201,25 +217,43 @@ class Pipeline:
         if probe is None:
             return None, 0.0
 
+        revision = self._storage.people_revision
+        if revision != self._identity_cache_revision:
+            references: list[tuple[str, bytes]] = []
+            for row in self._storage.list_people_with_embeddings():
+                for stored in row["embeddings"]:
+                    if not stored:
+                        continue
+                    try:
+                        references.append((str(row["name"]), self._crypto.decrypt(stored)))
+                    except Exception:
+                        # A corrupt legacy row must not break recognition.
+                        continue
+            self._identity_references = references
+            self._identity_cache_revision = revision
+
         best_name: str | None = None
         best_distance = float("inf")
         threshold = self._runtime.face_threshold
-        for row in self._storage.list_people_with_embeddings():
-            for stored in row["embeddings"]:
-                if not stored:
-                    continue
-                try:
-                    plain = self._crypto.decrypt(stored)
-                except Exception:
-                    continue
-                distance = self._recognizer.distance(probe, plain)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_name = row["name"]
+        for name, plain in self._identity_references:
+            distance = self._recognizer.distance(probe, plain)
+            if distance < best_distance:
+                best_distance = distance
+                best_name = name
 
         if best_name is not None and best_distance <= threshold:
             return best_name, max(0.0, 1.0 - best_distance)
         return None, 0.0
+
+    def _should_identify(self, source: str, track: Track, now: float) -> bool:
+        """Не повторять дорогой face embedding на каждом кадре одного трека."""
+        key = (source, track.id)
+        revision = self._storage.people_revision
+        previous = self._identity_attempts.get(key)
+        if previous is not None and previous[1] == revision and now - previous[0] < 2.0:
+            return False
+        self._identity_attempts[key] = (now, revision)
+        return True
 
     def _tracker(self, source: str) -> IoUTracker:
         tr = self._trackers.get(source)
@@ -328,6 +362,10 @@ class Pipeline:
         identity = self._runtime.detect_mode == "identity"
         zones = parse_zones(self._runtime.zones_json)
         skip_yolo = self._detector.backend == "motion"
+        entered_v: list[VoiceTrack] = []
+        active_v: list[VoiceTrack] = []
+        exited_v: list[VoiceTrack] = []
+        newly_v: list[VoiceTrack] = []
 
         for source, camera in self._cameras:
             frame = camera.read()
@@ -351,10 +389,12 @@ class Pipeline:
             for track in update.entered:
                 track.zone = zone_by_box.get(track.box)
                 if identity:
-                    name, conf = self._identify_crop(frame, track.box)
-                    track.person_name = name
-                    track.confidence = conf
-                    track.identified = name is not None
+                    if self._should_identify(source, track, now) or self._voice_alarming():
+                        name, conf = self._identify_crop(frame, track.box)
+                        track.person_name = name
+                        track.confidence = conf
+                        track.identified = name is not None
+                entered_v.append(_voice_track(source, track))
                 key = self._track_key(source, track, "enter")
                 preview_items.append((
                     track.box,
@@ -372,14 +412,19 @@ class Pipeline:
 
             for track in update.active:
                 if track.id in entered_ids:
+                    active_v.append(_voice_track(source, track))
                     continue
-                if identity and not track.identified:
+                if identity and not track.identified and (
+                    self._should_identify(source, track, now) or self._voice_alarming()
+                ):
                     name, conf = self._identify_crop(frame, track.box)
                     if name is not None:
                         track.person_name = name
                         track.confidence = conf
                         track.identified = True
+                        newly_v.append(_voice_track(source, track))
                 track.zone = zone_by_box.get(track.box, track.zone)
+                active_v.append(_voice_track(source, track))
                 preview_items.append((
                     track.box,
                     f"{track.person_name or '?'} {track.confidence:.2f}".strip(),
@@ -387,6 +432,8 @@ class Pipeline:
                 ))
 
             for track in update.exited:
+                self._identity_attempts.pop((source, track.id), None)
+                exited_v.append(_voice_track(source, track))
                 key = self._track_key(source, track, "exit")
                 if not self._should_store() or not self._runtime.notify_exit:
                     continue
@@ -402,10 +449,29 @@ class Pipeline:
                 self._preview_items = preview_items
 
         self._steps += 1
-        if self._steps % 25 == 0:
+        # Retention is a potentially expensive write. A periodic wall-clock
+        # task keeps it out of the hot frame path without letting it disappear.
+        if time.monotonic() - self._last_prune_at >= 300.0:
             self._storage.prune_events(
                 self._runtime.events_max, self._runtime.events_ttl_days,
             )
+            self._last_prune_at = time.monotonic()
+        if self._voice is not None:
+            notices = self._voice.observe(VoiceScene(
+                armed=self._runtime.armed,
+                identity=identity,
+                quiet=self._runtime.is_quiet(),
+                entered=entered_v,
+                active=active_v,
+                exited=exited_v,
+                newly_identified=newly_v,
+            ))
+            for notice in notices:
+                events.append(DetectionEvent(
+                    None, 0.0, None, now,
+                    event_type=notice.event_type,
+                    caption=notice.caption,
+                ))
         return events
 
     @property
@@ -443,4 +509,16 @@ class Pipeline:
         tracks = sum(t.active_count for t in self._trackers.values())
         lines.append(f"Треков: {tracks}")
         lines.append(f"Событий в БД: {self._storage.count_events()}")
+        if self._voice is not None:
+            lines.append(self._voice.status_line())
         return "\n".join(lines)
+
+
+def _voice_track(source: str, track: Track) -> VoiceTrack:
+    return VoiceTrack(
+        track_id=f"{source}:{track.id}",
+        person_name=track.person_name,
+        zone=track.zone,
+        source=source,
+        identified=track.identified,
+    )

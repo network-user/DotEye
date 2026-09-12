@@ -12,4 +12,7 @@ ultralytics>=8.1
 # insightface>=0.7.3
 # onnxruntime>=1.16
 
+# Голос и тревога (SAPI на Windows, espeak на Linux)
+pyttsx3>=2.90
+
 # Для разработки и тестов см. requirements-dev.txt

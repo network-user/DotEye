@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import numpy as np
 import pytest
 
@@ -98,5 +99,49 @@ def test_detect_rejects_bad_token(crypto: Crypto) -> None:
         client = RemoteClient(f"http://127.0.0.1:{port}", other, timeout=2.0)
         with pytest.raises(RuntimeError, match="токен|401|HTTP"):
             client.detect(np.zeros((8, 8, 3), dtype=np.uint8))
+    finally:
+        server.stop()
+
+
+def test_client_rejects_unencrypted_remote_url(crypto: Crypto) -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        RemoteClient("http://192.0.2.1:8099", crypto)
+
+
+def test_client_rejects_invalid_boxes(crypto: Crypto) -> None:
+    server = RemoteServer("127.0.0.1", 0, lambda _frame: [(4, 4, 2, 2)], crypto)
+    port = server._server.server_address[1]
+    server.start()
+    try:
+        client = RemoteClient(f"http://127.0.0.1:{port}", crypto)
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            client.detect(np.zeros((8, 8, 3), dtype=np.uint8))
+    finally:
+        server.stop()
+
+
+def test_client_validates_remote_response(crypto: Crypto) -> None:
+    client = RemoteClient("http://127.0.0.1:8099", crypto)
+    client._request = lambda *_args: (200, b'{"boxes": [[1, 2, 1, 4]]}')  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="некорректный"):
+        client.detect(np.zeros((8, 8, 3), dtype=np.uint8))
+
+
+def test_server_rejects_oversized_body_before_reading(crypto: Crypto) -> None:
+    server = RemoteServer("127.0.0.1", 0, lambda _frame: [], crypto)
+    port = server._server.server_address[1]
+    server.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        conn.request(
+            "POST",
+            "/detect",
+            body=b"",
+            headers={
+                "Content-Length": str(2 * 1024 * 1024 + 1),
+                "X-DotEye-Token": crypto.auth_token(),
+            },
+        )
+        assert conn.getresponse().status == 400
     finally:
         server.stop()

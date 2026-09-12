@@ -12,6 +12,7 @@ WorkingDirectory=/opt/doteye
 # Секреты и настройки - в /opt/doteye/.env (не коммитить).
 EnvironmentFile=/opt/doteye/.env
 Environment=PYTHONUNBUFFERED=1
+UMask=0077
 
 ExecStart=/opt/doteye/.venv/bin/python -m doteye.main
 
@@ -23,6 +24,14 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 ReadWritePaths=/opt/doteye/data
 
 [Install]

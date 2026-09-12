@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -14,7 +15,10 @@ from doteye import bot, models
 from doteye.config import Settings
 from doteye.crypto import Crypto, generate_key_b64
 from doteye.runtime import Runtime
+from doteye.audio import DummyPlayer
 from doteye.storage import Storage
+from doteye.tts import DummyTTS
+from doteye.voice import build_voice
 
 
 class FakeMessage:
@@ -66,6 +70,7 @@ def test_panel_keyboard_has_device_button(env) -> None:
     assert any("Охрана" in label for label in labels)
     assert any("Здоровье" in label for label in labels)
     assert any("след." in label for label in labels)
+    assert any("Голос" in label for label in labels)
 
 
 def test_model_keyboard_marks_current(env) -> None:
@@ -82,6 +87,7 @@ def test_status_text_contains_key_fields(env) -> None:
     assert "YOLOv8n" in text
     assert "cpu" in text
     assert "Охрана" in text
+    assert "Голос" in text
 
 
 @pytest.mark.asyncio
@@ -172,7 +178,7 @@ async def test_assign_event_helper(env) -> None:
 def test_is_admin_rules() -> None:
     open_settings = Settings(admin_ids=[], allow_open_access=False)
     assert bot._is_admin(FakeMessage(user_id=99), open_settings) is False
-    open_dev = Settings(admin_ids=[], allow_open_access=True)
+    open_dev = Settings(environment="development", admin_ids=[], allow_open_access=True)
     assert bot._is_admin(FakeMessage(user_id=99), open_dev) is True
 
     closed = Settings(admin_ids=[1, 2])
@@ -180,6 +186,29 @@ def test_is_admin_rules() -> None:
     assert bot._is_admin(FakeMessage(user_id=3), closed) is False
     assert bot._is_admin_user(None, closed) is False
     assert bot._is_admin_user(2, closed) is True
+
+
+def test_queue_notifications_persists_one_delivery_per_admin(env) -> None:
+    event_id = env.storage.add_event(None, b"encrypted", 0.6)
+    event = SimpleNamespace(
+        event_id=event_id,
+        event_type="enter",
+        person_name=None,
+        confidence=0.6,
+        jpeg=b"preview",
+        detected_at=123.0,
+        caption="DotEye: unknown",
+    )
+    settings = Settings(admin_ids=[11, 22])
+    bot.queue_notifications(settings, env.storage, env.crypto, event)
+    bot.queue_notifications(settings, env.storage, env.crypto, event)
+
+    rows = env.storage.claim_due_notifications(limit=10)
+    assert [int(row["admin_id"]) for row in rows] == [11, 22]
+    assert all(row["jpeg"] != b"preview" for row in rows)
+    assert all(env.crypto.decrypt(bytes(row["jpeg"])) == b"preview" for row in rows)
+    assert all(json.loads(str(row["payload"]))["unknown_enter"] is True for row in rows)
+    assert all(json.loads(str(row["payload"]))["show_dismiss"] is True for row in rows)
 
 
 @pytest.mark.asyncio
@@ -226,3 +255,33 @@ async def test_middleware_injects_and_passes(env) -> None:
     assert seen["runtime"] is env.runtime
     assert seen["storage"] is env.storage
     assert seen["crypto"] is env.crypto
+    assert seen["voice"] is None
+
+
+@pytest.mark.asyncio
+async def test_cb_voice_toggle_and_panel(env) -> None:
+    cq = FakeCallback("voice:open")
+    await bot.cb_voice_open(cq, env.runtime, None)
+    assert cq.message.edits
+    assert "Голос и тревога" in cq.message.edits[-1][0]
+
+    cq = FakeCallback("voice:tog:voice_welcome")
+    assert env.runtime.voice_welcome is True
+    await bot.cb_voice_toggle(cq, env.runtime, None)
+    assert env.runtime.voice_welcome is False
+
+
+@pytest.mark.asyncio
+async def test_voice_say_and_alarm(env) -> None:
+    tts = DummyTTS()
+    voice = build_voice(env.runtime, tts, DummyPlayer(), start_worker=False)
+    assert voice.announce("Отойди!")
+    voice.drain()
+    assert tts.texts[-1] == "Отойди!"
+
+    cq = FakeCallback("voice:trigger")
+    await bot.cb_voice_trigger(cq, env.runtime, voice)
+    assert voice.alarming
+    cq = FakeCallback("voice:dismiss")
+    await bot.cb_voice_dismiss(cq, env.runtime, voice)
+    assert voice.alarming is False

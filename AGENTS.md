@@ -30,8 +30,8 @@ python -m doteye.main
 | Установка | `pip install -r requirements.txt` |
 | Установка (dev + тесты) | `pip install -r requirements-dev.txt` |
 | Запуск | `python -m doteye.main` |
-| Remote-сервер | `python -m doteye.remote_server --host 0.0.0.0 --port 8099` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py remote_server.py run.py bench.py` |
+| Remote-сервер | `python -m doteye.remote_server --host 127.0.0.1 --port 8099` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/remote_server.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py remote_server.py run.py bench.py` |
 | Тесты | `python -m pytest tests -q` |
 | Бенчмарк | `python bench.py` |
 | Docker | `docker compose up -d --build doteye` |
@@ -41,21 +41,22 @@ python -m doteye.main
 
 ```
 doteye/
-├── main.py        точка входа: собирает пайплайн + бота, очередь событий, shutdown
-├── config.py      Settings из env, дефолты
+├── main.py        точка входа: собирает пайплайн + бота, SQLite outbox, shutdown
+├── config.py      Settings из env, валидация и allowlist сетевых URL
 ├── runtime.py     env-настройки + переопределения из чата (Storage)
 ├── models.py      каталог YOLO-моделей с описаниями для панели
 ├── bot.py         aiogram 3: роутер, FSM-диалоги, админ-панель, уведомления
-├── camera.py      источники кадров: вебка / RTSP / MJPEG (фабрика)
+├── camera.py      источники кадров: вебка / RTSP / MJPEG, reader-поток и reconnect backoff
 ├── detector.py    детекция: yolo | yunet | motion, auto-деградация, remote
-├── remote.py      HTTP + AES-GCM: клиент и сервер remote-инференса
+├── remote.py      ограниченный HTTP transport + AES-GCM: клиент и сервер remote-инференса
+├── remote_server.py модульная точка входа remote inference
 ├── recognizer.py  лицо -> embedding (insightface) + DummyRecognizer fallback
 ├── crypto.py      AES-256-GCM (кадры, embeddings, remote)
 ├── tracker.py     IoU-трекер входа/выхода
 ├── zones.py       ROI кадра (0..1)
 ├── annotate.py    кроп бокса и рамки на JPEG
 ├── pipeline.py    цикл камера -> трек enter/exit -> событие, кэш кадра, prune
-└── storage.py     SQLite WAL: people, embeddings, events, settings
+└── storage.py     SQLite WAL: people, embeddings, events, settings, notification outbox
 tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote, tracker, zones
 bench.py           бенчмарк детектора: FPS и время инференса
 remote_server.py   точка входа remote-сервера инференса
@@ -78,7 +79,9 @@ docs/cover.svg     обложка DotBioSite
 |------------|------------|
 | `DOTEYE_BOT_TOKEN` | токен Telegram-бота |
 | `DOTEYE_ADMIN_IDS` | id админов через запятую |
-| `DOTEYE_ALLOW_OPEN_ACCESS` | `1` = пустой список админов пускает всех (только dev) |
+| `DOTEYE_ENV` | `production` по умолчанию; `development` нужен для dev-only опций |
+| `DOTEYE_ALLOW_OPEN_ACCESS` | `1` = пустой список админов пускает всех, только при `DOTEYE_ENV=development` |
+| `DOTEYE_ALLOWED_URL_HOSTS` | точный CSV allowlist хостов сетевых камер и remote |
 | `DOTEYE_DETECT_MODE` | `presence` \| `identity` |
 | `DOTEYE_CAMERA_SOURCE` | `0` = вебка, rtsp/http; несколько через `\|` |
 | `DOTEYE_DETECTOR` | `auto` \| `yolo` \| `yunet` \| `motion` |
@@ -98,9 +101,9 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_EVENTS_TTL_DAYS` | TTL событий, дни |
 | `DOTEYE_ZONES` | JSON зон кадра |
 | `DOTEYE_REMOTE_PROCESSING` | `1` = вынос инференса на сервер |
-| `DOTEYE_REMOTE_URL` | адрес remote-сервера |
+| `DOTEYE_REMOTE_URL` | HTTPS-адрес remote-сервера; HTTP допустим только для loopback/development |
 | `DOTEYE_REMOTE_FALLBACK` | `1` = локальный детектор при падении remote |
-| `DOTEYE_REMOTE_INSECURE` | `1` = не проверять TLS remote |
+| `DOTEYE_REMOTE_INSECURE` | `1` = не проверять TLS remote, только при `DOTEYE_ENV=development` |
 | `DOTEYE_CRYPTO_KEY` | base64 32 байта для AES-GCM |
 
 Не читай `.env`. Не коммить секреты.

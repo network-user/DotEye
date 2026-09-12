@@ -47,6 +47,28 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER,
+    admin_id INTEGER NOT NULL,
+    dedup_key TEXT NOT NULL UNIQUE,
+    payload TEXT NOT NULL,
+    jpeg BLOB,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT,
+    FOREIGN KEY (event_id) REFERENCES events (id),
+    UNIQUE(event_id, admin_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_person_embeddings_person_id
+    ON person_embeddings(person_id);
+CREATE INDEX IF NOT EXISTS idx_events_detected_at ON events(detected_at);
+CREATE INDEX IF NOT EXISTS idx_events_person_id ON events(person_id);
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
+    ON notification_outbox(sent_at, next_attempt_at, id);
 """
 
 _EVENT_COLUMNS = {
@@ -72,9 +94,11 @@ class Storage:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.executescript(_SCHEMA)
             self._migrate()
             self._conn.commit()
+        self._people_revision = 0
 
     def _migrate(self) -> None:
         """Добавить колонки и перенести embeddings со старой схемы."""
@@ -109,6 +133,12 @@ class Storage:
         with self._lock:
             self._conn.close()
 
+    @property
+    def people_revision(self) -> int:
+        """Монотонная версия эталонов для недорогой инвалидации кэша pipeline."""
+        with self._lock:
+            return self._people_revision
+
     # -- people ---------------------------------------------------------
 
     def add_person(self, name: str, embedding: bytes | None = None) -> int:
@@ -140,6 +170,8 @@ class Storage:
                     (person_id, embedding, _now()),
                 )
             self._conn.commit()
+            if embedding is not None:
+                self._people_revision += 1
             return person_id
 
     def add_embedding(self, person_id: int, embedding: bytes) -> int:
@@ -154,6 +186,7 @@ class Storage:
                 (embedding, person_id),
             )
             self._conn.commit()
+            self._people_revision += 1
             return int(cur.lastrowid)
 
     def get_person(self, name: str) -> sqlite3.Row | None:
@@ -226,6 +259,7 @@ class Storage:
             )
             self._conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
             self._conn.commit()
+            self._people_revision += 1
             return True
 
     def delete_person_by_id(self, person_id: int) -> bool:
@@ -292,6 +326,94 @@ class Storage:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
             return int(row["n"]) if row else 0
 
+    # -- durable notification outbox -----------------------------------
+
+    def enqueue_notification(
+        self,
+        dedup_key: str,
+        event_id: int | None,
+        admin_id: int,
+        payload: str,
+        jpeg: bytes | None = None,
+    ) -> int:
+        """Сохранить уведомление до отправки, идемпотентно по ``dedup_key``.
+
+        Для событий ключ обычно содержит event_id и admin_id. Для служебных
+        alert без event_id вызывающий код передаёт свой UUID или другой
+        устойчивый ключ дедупликации.
+        """
+        if not dedup_key:
+            raise ValueError("dedup_key must not be empty")
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO notification_outbox "
+                "(event_id, admin_id, dedup_key, payload, jpeg, next_attempt_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (event_id, int(admin_id), dedup_key, payload, jpeg, _now()),
+            )
+            if cur.lastrowid:
+                notification_id = int(cur.lastrowid)
+            else:
+                row = self._conn.execute(
+                    "SELECT id FROM notification_outbox WHERE dedup_key = ?",
+                    (dedup_key,),
+                ).fetchone()
+                if row is None:
+                    # event/admin is a second idempotency guard for older
+                    # callers which accidentally construct another key.
+                    row = self._conn.execute(
+                        "SELECT id FROM notification_outbox "
+                        "WHERE event_id IS ? AND admin_id = ?",
+                        (event_id, int(admin_id)),
+                    ).fetchone()
+                if row is None:
+                    raise RuntimeError("notification outbox insert was not persisted")
+                notification_id = int(row["id"])
+            self._conn.commit()
+            return notification_id
+
+    def claim_due_notifications(
+        self, now: str | None = None, limit: int = 20
+    ) -> list[sqlite3.Row]:
+        """Вернуть ещё не доставленные сообщения, срок повтора которых наступил.
+
+        Один sender в main обрабатывает список последовательно, поэтому не
+        нужен ненадёжный lock-lease протокол. Статус меняется только после
+        успешной отправки или планирования retry.
+        """
+        if limit <= 0:
+            return []
+        due_at = now or _now()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM notification_outbox "
+                "WHERE sent_at IS NULL AND next_attempt_at <= ? "
+                "ORDER BY next_attempt_at, id LIMIT ?",
+                (due_at, int(limit)),
+            ).fetchall()
+
+    def mark_notification_sent(self, notification_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE notification_outbox SET sent_at = ?, last_error = NULL "
+                "WHERE id = ?",
+                (_now(), int(notification_id)),
+            )
+            self._conn.commit()
+
+    def retry_notification(
+        self, notification_id: int, next_attempt_at: str, error: str | None
+    ) -> None:
+        """Запланировать повтор. Ошибка ограничена, чтобы не раздувать SQLite."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE notification_outbox "
+                "SET attempts = attempts + 1, next_attempt_at = ?, last_error = ? "
+                "WHERE id = ? AND sent_at IS NULL",
+                (next_attempt_at, (error or "")[:500], int(notification_id)),
+            )
+            self._conn.commit()
+
     def prune_events(self, max_count: int | None = None, ttl_days: float | None = None) -> int:
         """Удалить старые события. Возвращает число удалённых строк."""
         deleted = 0
@@ -305,22 +427,16 @@ class Storage:
                 )
                 deleted += cur.rowcount or 0
             if max_count is not None and max_count > 0:
-                keep = [
-                    int(row["id"])
-                    for row in self._conn.execute(
-                        "SELECT id FROM events ORDER BY id DESC LIMIT ?",
-                        (int(max_count),),
-                    ).fetchall()
-                ]
-                if keep:
-                    placeholders = ",".join("?" * len(keep))
+                # Avoid materialising every retained id (and SQLite's bind
+                # limit) when the event archive is large.
+                cutoff_row = self._conn.execute(
+                    "SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?",
+                    (int(max_count) - 1,),
+                ).fetchone()
+                if cutoff_row is not None:
                     cur = self._conn.execute(
-                        f"DELETE FROM events WHERE id NOT IN ({placeholders})",
-                        keep,
+                        "DELETE FROM events WHERE id < ?", (int(cutoff_row["id"]),)
                     )
-                    deleted += cur.rowcount or 0
-                else:
-                    cur = self._conn.execute("DELETE FROM events")
                     deleted += cur.rowcount or 0
             if deleted:
                 self._conn.commit()
