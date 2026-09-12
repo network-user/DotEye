@@ -97,11 +97,15 @@ class Runtime:
     def model_path(self, value: str) -> None:
         self._storage.set("model_path", value)
 
-    # -- только из env (не меняются на ходу) ---------------------------
-
     @property
     def device(self) -> str:
-        return self._settings.device
+        return self._get_str("device", self._settings.device)
+
+    @device.setter
+    def device(self, value: str) -> None:
+        self._storage.set("device", value)
+
+    # -- только из env (не меняются на ходу) ---------------------------
 
     @property
     def remote_processing(self) -> bool:

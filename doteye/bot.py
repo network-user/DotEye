@@ -7,6 +7,7 @@
   /mode       - переключить presence | identity (детекция | распознавание лиц)
   /camera     - задать источник (0 = вебка, rtsp/http адрес)
   /detector   - бэкенд детектора: auto | yolo | yunet | motion
+  /device     - устройство инференса: cpu | cuda | mps
   /model      - выбрать YOLO-модель (с описанием мощности)
   /confidence - минимальная уверенность детекции
   /cooldown   - пауза между уведомлениями, сек
@@ -55,6 +56,7 @@ HELP = (
     "/mode - presence <-> identity\n"
     "/camera - источник кадров (0, rtsp://, http://)\n"
     "/detector - auto | yolo | yunet | motion\n"
+    "/device - cpu | cuda | mps\n"
     "/model - выбрать YOLO-модель\n"
     "/confidence - порог детекции (0..1)\n"
     "/cooldown - пауза между уведомлениями, сек\n"
@@ -136,6 +138,9 @@ class AccessMiddleware(BaseMiddleware):
 router = Router()
 
 
+DEVICES = ["cpu", "cuda", "mps"]
+
+
 def _panel_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     mode_next = "identity" if runtime.detect_mode == "presence" else "presence"
     backend_next = "yolo" if runtime.detector_backend != "yolo" else "auto"
@@ -151,6 +156,9 @@ def _panel_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=f"Детектор: {runtime.detector_backend} -> {backend_next}",
                 callback_data="panel:detector",
+            ),
+            InlineKeyboardButton(
+                text=f"Устройство: {runtime.device}", callback_data="panel:device"
             ),
         ],
         [
@@ -259,6 +267,14 @@ async def cb_detector(cq: CallbackQuery, runtime: Runtime) -> None:
     await cq.answer(f"Детектор: {runtime.detector_backend}")
 
 
+@router.callback_query(F.data == "panel:device")
+async def cb_device(cq: CallbackQuery, runtime: Runtime) -> None:
+    idx = DEVICES.index(runtime.device) if runtime.device in DEVICES else 0
+    runtime.device = DEVICES[(idx + 1) % len(DEVICES)]
+    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.answer(f"Устройство: {runtime.device}")
+
+
 @router.callback_query(F.data == "panel:model")
 async def cb_model(cq: CallbackQuery, runtime: Runtime) -> None:
     await cq.message.edit_text(
@@ -356,6 +372,25 @@ async def cmd_detector(message: Message, runtime: Runtime, command: Command) -> 
         return
     runtime.detector_backend = value
     await message.answer(f"Детектор: {value}")
+
+
+@router.message(Command("device"))
+async def cmd_device(message: Message, runtime: Runtime, command: Command) -> None:
+    value = (command.args or "").strip().lower()
+    if not value:
+        await message.answer(
+            f"Текущее устройство: {runtime.device}\n"
+            "Сменить: /device cpu | cuda | mps\n"
+            "cuda - GPU NVIDIA, mps - Apple Silicon, cpu - всегда доступен."
+        )
+        return
+    if value not in DEVICES:
+        await message.answer("Допустимо: cpu | cuda | mps")
+        return
+    runtime.device = value
+    await message.answer(
+        f"Устройство: {value}\nДетектор пересоберётся на ходу."
+    )
 
 
 @router.message(Command("model"))

@@ -58,6 +58,8 @@ class Pipeline:
         self._crypto = crypto
         self._runtime = runtime
         self._last_event_ts = 0.0
+        # кулдаун отдельно на каждого (имя | "unknown"), а не на всю сцену
+        self._last_seen: dict[str, float] = {}
         self._running = False
         # пауза между итерациями фонового цикла (main задаёт из Settings)
         self.poll_interval: float = 0.1
@@ -66,13 +68,14 @@ class Pipeline:
         self._detector_backend = runtime.detector_backend
         self._model_path = runtime.model_path
         self._min_confidence = runtime.min_confidence
+        self._device = runtime.device
 
     def start(self) -> None:
         self._running = True
         print(
             f"[pipeline] started (camera={self._camera_source}, "
             f"detector={self._detector.backend}, model={self._model_path}, "
-            f"mode={self._runtime.detect_mode})"
+            f"device={self._device}, mode={self._runtime.detect_mode})"
         )
 
     def stop(self) -> None:
@@ -95,20 +98,26 @@ class Pipeline:
         backend = self._runtime.detector_backend
         model_path = self._runtime.model_path
         min_conf = self._runtime.min_confidence
+        device = self._runtime.device
         if (backend == self._detector_backend
                 and model_path == self._model_path
-                and min_conf == self._min_confidence):
+                and min_conf == self._min_confidence
+                and device == self._device):
             return
-        print(f"[pipeline] detector -> {backend}, model -> {model_path}")
+        print(
+            f"[pipeline] detector -> {backend}, model -> {model_path}, "
+            f"device -> {device}"
+        )
         old = self._detector
         self._detector = build_detector(
-            backend, model_path, self._runtime.device,
+            backend, model_path, device,
             min_conf, self._runtime.remote_processing,
             self._runtime.remote_url, self._runtime.face_model,
         )
         self._detector_backend = backend
         self._model_path = model_path
         self._min_confidence = min_conf
+        self._device = device
         old.close()
 
     def _identify(self, frame: np.ndarray) -> tuple[str | None, float]:
@@ -141,7 +150,12 @@ class Pipeline:
         return None, 0.0
 
     def step(self) -> DetectionEvent | None:
-        """Один прогон. Возвращает событие, если есть человек и пройден кулдаун."""
+        """Один прогон. Возвращает событие, если есть человек и пройден кулдаун.
+
+        Кулдаун считается отдельно для каждого человека (имя в identity mode,
+        иначе "unknown"), поэтому известный может не спамить, пока другой
+        заходит - его событие всё равно пройдёт.
+        """
         self._maybe_rebuild_camera()
         self._maybe_rebuild_detector()
 
@@ -153,14 +167,15 @@ class Pipeline:
         if not boxes:
             return None
 
-        now = time.time()
-        if now - self._last_event_ts < self._runtime.cooldown_seconds:
-            return None
-
         person_name: str | None = None
         confidence = 0.0
         if self._runtime.detect_mode == "identity":
             person_name, confidence = self._identify(frame)
+
+        now = time.time()
+        key = person_name or "unknown"
+        if now - self._last_seen.get(key, 0.0) < self._runtime.cooldown_seconds:
+            return None
 
         ok, buf = cv2.imencode(
             ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self._runtime.jpeg_quality]
@@ -176,6 +191,7 @@ class Pipeline:
             person_id = row["id"] if row else None
         self._storage.add_event(person_id, encrypted, confidence)
 
+        self._last_seen[key] = now
         self._last_event_ts = now
         return DetectionEvent(person_name, confidence, jpeg, now)
 
