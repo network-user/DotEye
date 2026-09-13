@@ -47,7 +47,7 @@ def test_runtime_voice_settings(tmp_path: Path) -> None:
     rt = Runtime(settings, st)
     assert rt.voice_enabled is True
     assert rt.voice_presence is True
-    assert rt.voice_clear_on == "both"
+    assert rt.voice_clear_on == "known"
     rt.voice_enabled = False
     rt.voice_volume = 0.4
     rt.voice_clear_on = "known"

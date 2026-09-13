@@ -244,7 +244,7 @@ class Settings:
     voice_grace_seconds: float = field(
         default_factory=lambda: _env_float("DOTEYE_VOICE_GRACE_SECONDS", 4.0)
     )
-    voice_clear_on: str = field(default_factory=lambda: os.getenv("DOTEYE_VOICE_CLEAR_ON", "both"))
+    voice_clear_on: str = field(default_factory=lambda: os.getenv("DOTEYE_VOICE_CLEAR_ON", "known"))
     voice_volume: float = field(default_factory=lambda: _env_float("DOTEYE_VOICE_VOLUME", 0.8))
     voice_rate: float = field(default_factory=lambda: _env_float("DOTEYE_VOICE_RATE", 1.0))
     voice_tts_voice: str = field(default_factory=lambda: os.getenv("DOTEYE_VOICE_TTS_VOICE", ""))
@@ -292,6 +292,14 @@ class Settings:
             raise ConfigurationError("лимиты хранения событий вне безопасного диапазона")
         if not 0 < self.face_threshold <= 2:
             raise ConfigurationError("DOTEYE_FACE_THRESHOLD должен быть в диапазоне (0..2]")
+        if self.privacy_mode and self.privacy_mode.lower() not in {
+            "off", "person", "face", "silhouette", "all",
+        }:
+            raise ConfigurationError(
+                "DOTEYE_PRIVACY_MODE: off, person, face, silhouette или all"
+            )
+        if not 2 <= self.privacy_blocks <= 64:
+            raise ConfigurationError("DOTEYE_PRIVACY_BLOCKS должен быть в диапазоне 2..64")
         if self.voice_clear_on not in {"both", "known", "exit"}:
             raise ConfigurationError("DOTEYE_VOICE_CLEAR_ON: both, known или exit")
         if not 2 <= self.voice_repeat_seconds <= 3600:

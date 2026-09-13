@@ -131,3 +131,11 @@ def test_notification_outbox_is_durable_and_idempotent(tmp_path: Path) -> None:
     assert st.claim_due_notifications(now=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat()) == []
     assert st._conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 0
     st.close()
+
+
+def test_event_note_is_stored_as_bytes(tmp_path: Path) -> None:
+    st = make_storage(tmp_path)
+    event_id = st.add_event(None, b"frame")
+    st.update_event_note(event_id, b"encrypted note")
+    assert st.get_event(event_id)["note"] == b"encrypted note"
+    st.close()

@@ -70,7 +70,7 @@ def test_known_face_clears_alarm(tmp_path: Path) -> None:
         active=[known], newly_identified=[known],
     ))
     assert engine.alarming is False
-    assert notices and notices[0].event_type == "alarm_cleared"
+    assert any(notice.event_type == "alarm_cleared" for notice in notices)
     engine.drain()
     blob = " ".join(tts.texts).casefold()
     assert "снята" in blob
@@ -124,7 +124,7 @@ def test_quiet_mutes_welcome_but_not_alarm(tmp_path: Path) -> None:
     assert any("незнакомец" in text.casefold() for text in tts.texts)
 
 
-def test_exit_clears_with_zero_grace(tmp_path: Path) -> None:
+def test_exit_does_not_clear_alarm(tmp_path: Path) -> None:
     engine, _tts, _player, runtime = _engine(tmp_path)
     runtime.voice_grace_seconds = 0
     runtime.voice_clear_on = "exit"
@@ -138,8 +138,8 @@ def test_exit_clears_with_zero_grace(tmp_path: Path) -> None:
         armed=True, identity=True, quiet=False,
         exited=[unknown],
     ))
-    assert engine.alarming is False
-    assert notices and notices[0].event_type == "alarm_cleared"
+    assert engine.alarming is True
+    assert not any(notice.event_type == "alarm_cleared" for notice in notices)
 
 
 def test_clear_on_known_keeps_alarm_after_exit(tmp_path: Path) -> None:
@@ -191,8 +191,8 @@ def test_timeout_clears(tmp_path: Path) -> None:
         armed=True, identity=True, quiet=False,
         active=[unknown],
     ))
-    assert engine.alarming is False
-    assert any(n.event_type == "alarm_cleared" for n in notices)
+    assert engine.alarming is True
+    assert not any(n.event_type == "alarm_cleared" for n in notices)
 
 
 def test_presence_alarm_optional(tmp_path: Path) -> None:

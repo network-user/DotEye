@@ -568,15 +568,19 @@ _CLEAR_ON_LABELS = {
 def _voice_text(runtime: Runtime, voice: VoiceEngine | None) -> str:
     alarm = "ТРЕВОГА" if (voice is not None and voice.alarming) else "тихо"
     backend = voice.backend if voice is not None else "нет"
+    audio = "доступен" if voice is not None and voice.audio_available else "не найден"
     last = f"\nПоследняя фраза: {voice.last_phrase}" if voice and voice.last_phrase else ""
     err = f"\nОшибка: {voice.last_error}" if voice and voice.last_error else ""
     return (
         "Голос и тревога.\n"
         "Незнакомец в режиме identity: сирена и фраза из динамиков. "
-        "Если в кадре появляется человек из списка, тревога снимается. "
+        "Тревога звучит до кнопки «Снять тревогу» в Telegram или до "
+        "распознавания человека из списка в камере. После снятия звучит "
+        "подтверждение. "
         "«Сказать вслух» работает всегда, даже при выключенных авто-фразах.\n\n"
         f"Состояние: {alarm}\n"
         f"Движок: {backend}\n"
+        f"Динамик: {audio}\n"
         f"Авто: {_on(runtime.voice_enabled)}, "
         f"тревога {_on(runtime.voice_alarm_enabled)}, "
         f"сирена {_on(runtime.voice_siren_enabled)}, "
@@ -640,20 +644,14 @@ def _voice_keyboard(runtime: Runtime, voice: VoiceEngine | None) -> InlineKeyboa
                 callback_data="voice:tog:voice_mute_quiet",
             ),
         ],
-        [
-            InlineKeyboardButton(
-                text=f"Снятие: {_CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on)}",
-                callback_data="voice:clear_on",
-            ),
-        ],
+        [InlineKeyboardButton(
+            text="Снятие: вручную или распознанный человек",
+            callback_data="voice:clear_info",
+        )],
         [
             InlineKeyboardButton(
                 text=f"Повтор {runtime.voice_repeat_seconds:g}с",
                 callback_data="voice:num:voice_repeat_seconds",
-            ),
-            InlineKeyboardButton(
-                text=f"Таймаут {runtime.voice_timeout_seconds:g}с",
-                callback_data="voice:num:voice_timeout_seconds",
             ),
         ],
         [
@@ -1400,6 +1398,11 @@ async def cb_voice_clear_on(cq: CallbackQuery, runtime: Runtime,
     runtime.voice_clear_on = _next_item(list(CLEAR_ON_VALUES), runtime.voice_clear_on)
     await _edit_voice_panel(cq, runtime, voice)
     await cq.answer("Снятие: " + _CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on))
+
+
+@router.callback_query(F.data == "voice:clear_info")
+async def cb_voice_clear_info(cq: CallbackQuery) -> None:
+    await cq.answer("Снять: кнопкой в Telegram или лицом человека из списка", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("voice:num:"))

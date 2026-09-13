@@ -141,6 +141,10 @@ class VoiceEngine:
         player = self._player.name
         return f"{tts}+{player}"
 
+    @property
+    def audio_available(self) -> bool:
+        return self._player.available()
+
     def status_line(self) -> str:
         alarm = "ТРЕВОГА" if self._alarming else "idle"
         tts = "tts" if self._tts.available() else "нет tts"
@@ -319,8 +323,9 @@ class VoiceEngine:
     # -- внутренности ---------------------------------------------------
 
     def _clear_mode(self) -> str:
-        value = (self._runtime.voice_clear_on or "both").strip().lower()
-        return value if value in CLEAR_ON_VALUES else "both"
+        # Уход из кадра не доказывает, что опасности нет. Тревога снимается
+        # только вручную или после распознавания человека из списка.
+        return "known"
 
     def _phrase(self, key: str, **kwargs: str | None) -> str:
         template = self._runtime.voice_phrase(key)
@@ -434,9 +439,8 @@ class VoiceEngine:
         return VoiceNotice("alarm_cleared", caption)
 
     def _maybe_timeout(self, now: float) -> VoiceNotice | None:
-        limit = self._runtime.voice_timeout_seconds
-        if self._alarming and limit > 0 and now - self._alarm_since >= limit:
-            return self._clear_alarm(who=None, reason="timeout", announce=True)
+        # Автоснятие создаёт ложное чувство безопасности. Тревога завершается
+        # только вручную либо после успешного распознавания человека.
         return None
 
     def _maybe_repeat(self, now: float) -> None:
