@@ -133,13 +133,24 @@ def test_server_rejects_oversized_body_before_reading(crypto: Crypto) -> None:
     server.start()
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        import secrets
+        import time
+        from doteye.remote import (
+            NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, WORKER_ID_HEADER,
+        )
+        ts = str(int(time.time()))
+        nonce = secrets.token_hex(16)
+        sig = crypto.sign_request("POST", "/detect", ts, nonce, b"")
         conn.request(
             "POST",
             "/detect",
             body=b"",
             headers={
                 "Content-Length": str(2 * 1024 * 1024 + 1),
-                "X-DotEye-Token": crypto.auth_token(),
+                WORKER_ID_HEADER: "w_test",
+                TIMESTAMP_HEADER: ts,
+                NONCE_HEADER: nonce,
+                SIGNATURE_HEADER: sig,
             },
         )
         assert conn.getresponse().status == 400

@@ -41,11 +41,15 @@ services:
     environment:
       # Remote не должен получать токен Telegram и настройки бота.
       DOTEYE_CRYPTO_KEY: ${DOTEYE_CRYPTO_KEY:?DOTEYE_CRYPTO_KEY is required}
-    command: ["python", "-m", "doteye.remote_server", "--host", "0.0.0.0", "--port", "8099"]
+    command: ["python", "-m", "doteye.remote_server", "--host", "0.0.0.0", "--port", "8099", "--tls-cert", "/run/tls/server.crt", "--tls-key", "/run/tls/server.key"]
     ports:
-      # По умолчанию доступен только с хоста. Для внешней камеры используй VPN
-      # или TLS reverse proxy, не публикуй этот HTTP-порт напрямую в интернет.
+      # По умолчанию доступен только с хоста. Для внешней камеры используй TLS
+      # (сертификат в /run/tls) или reverse proxy, не публикуй HTTP-порт в интернет.
       - "127.0.0.1:8099:8099"
+    volumes:
+      # Положи server.crt/server.key рядом с compose; внешний хост без TLS
+      # сервер отвергнет. Для loopback достаточно убрать --tls-* из command.
+      - ./tls:/run/tls:ro
     read_only: true
     tmpfs:
       - /tmp

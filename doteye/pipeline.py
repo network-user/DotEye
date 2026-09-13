@@ -90,6 +90,7 @@ class Pipeline:
         self._gates: dict[str, MotionGate] = {}
         self._last_seen: dict[str, float] = {}
         self._parallel: dict[str, Detector] = {}
+        self._worker_recognizers: dict[str, Recognizer] = {}
         self._camera_cfgs: list[tuple[str, float, bool, bool, bool, str]] = []
         self._lock = threading.Lock()
         self._preview_frame: np.ndarray | None = None
@@ -170,6 +171,7 @@ class Pipeline:
             except Exception:
                 pass
         self._parallel.clear()
+        self._worker_recognizers.clear()
 
     def _parallel_enabled(self) -> bool:
         return bool(self._runtime.camera_parallel) and len(self._cameras) > 1
@@ -191,6 +193,25 @@ class Pipeline:
         )
         self._parallel[source] = det
         return det
+
+    def _worker_recognizer(self, source: str) -> Recognizer | None:
+        """Свой экземпляр recognizer на камеру в identity-режиме.
+
+        InsightFace app не потокобезопасен. Отдельный экземпляр снимает
+        сериализацию embedding-ов между камерами; если модель не загрузилась,
+        возвращаем общий recognizer (он остаётся под _identity_lock).
+        """
+        if not self._parallel_enabled():
+            return self._recognizer
+        if source in self._worker_recognizers:
+            return self._worker_recognizers[source]
+        if self._recognizer is None or not self._recognizer.available():
+            return self._recognizer
+        built = build_recognizer(self._device)
+        if not built.available():
+            return self._recognizer
+        self._worker_recognizers[source] = built
+        return built
 
     @property
     def poll_interval(self) -> float:
@@ -290,18 +311,26 @@ class Pipeline:
             self._recognizer_device = device
         self._mode_seen = mode
 
-    def _identify_crop(self, frame: np.ndarray, box: Box) -> tuple[str | None, float]:
-        if self._recognizer is None or not self._recognizer.available():
+    def _identify_crop(
+        self,
+        frame: np.ndarray,
+        box: Box,
+        recognizer: Recognizer | None = None,
+    ) -> tuple[str | None, float]:
+        recognizer = recognizer or self._recognizer
+        if recognizer is None or not recognizer.available():
             return None, 0.0
         crop = crop_box(frame, box)
         if crop is None:
             return None, 0.0
 
-        with self._identity_lock:
-            probe = self._recognizer.embed(crop)
-            if probe is None:
-                return None, 0.0
+        # Разные камеры могут иметь свои экземпляры recognizer, поэтому embed
+        # выполняется вне общего lock. Кэш эталонов общий и защищён lock-ом.
+        probe = recognizer.embed(crop)
+        if probe is None:
+            return None, 0.0
 
+        with self._identity_lock:
             revision = self._storage.people_revision
             if revision != self._identity_cache_revision:
                 references: list[tuple[str, bytes]] = []
@@ -316,15 +345,16 @@ class Pipeline:
                             continue
                 self._identity_references = references
                 self._identity_cache_revision = revision
+            references = list(self._identity_references)
 
-            best_name: str | None = None
-            best_distance = float("inf")
-            threshold = self._runtime.face_threshold
-            for name, plain in self._identity_references:
-                distance = self._recognizer.distance(probe, plain)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_name = name
+        best_name: str | None = None
+        best_distance = float("inf")
+        threshold = self._runtime.face_threshold
+        for name, plain in references:
+            distance = recognizer.distance(probe, plain)
+            if distance < best_distance:
+                best_distance = distance
+                best_name = name
 
         if best_name is not None and best_distance <= threshold:
             return best_name, max(0.0, 1.0 - best_distance)
@@ -493,6 +523,7 @@ class Pipeline:
             cfg = self._camera_cfg(source)
             _, _cooldown, quiet, notify_enter, notify_exit, _mode = cfg
             tracker = self._tracker(source)
+            worker_recognizer = self._worker_recognizer(source) if identity == "identity" else None
             tagged = boxes_by_source.get(source)
             if tagged is None:
                 tagged = filter_boxes(self._detector.detect(frame), zones, frame.shape)
@@ -505,7 +536,7 @@ class Pipeline:
             for track in update.entered:
                 track.zone = zone_by_box.get(track.box)
                 if identity == "identity" and (self._should_identify(source, track, now) or self._voice_alarming()):
-                    name, conf = self._identify_crop(frame, track.box)
+                    name, conf = self._identify_crop(frame, track.box, worker_recognizer)
                     track.person_name = name
                     track.confidence = conf
                     track.identified = name is not None
@@ -547,7 +578,7 @@ class Pipeline:
                 if identity == "identity" and not track.identified and (
                     self._should_identify(source, track, now) or self._voice_alarming()
                 ):
-                    name, conf = self._identify_crop(frame, track.box)
+                    name, conf = self._identify_crop(frame, track.box, worker_recognizer)
                     track.person_name = name
                     track.confidence = conf
                     track.identified = name is not None

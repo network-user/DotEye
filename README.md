@@ -4,10 +4,17 @@
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/Platform-Telegram%20%7C%20Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat" alt="Platform" />
   <img src="https://img.shields.io/badge/Category-Bot-orange?style=flat" alt="Category" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-7813-lightgrey?style=flat" alt="7813 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-10793-lightgrey?style=flat" alt="10793 lines of code" /><!-- loc:end -->
 </p>
 
 <img src="docs/cover.svg" width="720" alt="DotEye">
+
+<!-- audit:start -->
+<p>
+  <a href="docs/audit/latest.md"><img src="https://img.shields.io/badge/security_audit-passed-3fb950?style=flat" alt="security audit passed - full, leaks + code" /></a>
+  <a href="docs/audit/2026-09-13-silver-otter.md"><img src="https://img.shields.io/badge/date-2026--09--13-555?style=flat" alt="audit date" /></a>
+</p>
+<!-- audit:end -->
 
 DotEye - лабораторный Telegram-бот, который определяет, кто зашёл в комнату. Подключает вебку, IP-камеру или несколько источников сразу, детектирует людей через YOLO и шлёт уведомления только на вход и выход. Настройка ведётся в чате: охрана, тихие часы, зоны кадра, эталоны лиц, голос и тревога; не продукт охраны, см. [отказ от ответственности](#отказ-от-ответственности).
 
@@ -19,7 +26,7 @@ DotEye - лабораторный Telegram-бот, который определ
 - **Кадр с подписью**: на фото в Telegram рисуются бокс, имя и уверенность. У неизвестного кнопки «Это кто?» и «Снять тревогу».
 - **Голос и тревога**: сирена плюс TTS из динамиков машины. Незнакомец в режиме identity запускает тревогу; человек из списка в кадре снимает её. Приветствие, прощание и ручная фраза («отойди от двери») настраиваются в панели.
 - **Панель**: люди и события списками с кнопками, пагинация, `/cancel` для FSM, здоровье камеры и фактический бэкенд детектора.
-- **Несколько камер и зоны**: источники через `|`, отдельный reader с последним кадром для каждой камеры, reconnect backoff и ROI в координатах 0..1.
+- **Несколько камер и зоны**: источники через `|` (до 4), отдельный reader с последним кадром для каждой камеры, reconnect backoff и ROI в координатах 0..1. `DOTEYE_CAMERA_PARALLEL=1` обрабатывает камеры параллельно (свой детектор и recognizer на камеру), `DOTEYE_CAMERA_NAMES` задаёт читаемые имена, а в панели у каждой камеры свои кулдаун, режим, тихие часы, имя и уведомления.
 - **Remote с fallback**: ограниченный HTTP API, AES-GCM, проверка схемы ответов, локальный fallback и HTTPS/VPN для внешней сети.
 - **Доставка событий**: SQLite outbox с зашифрованным JPEG, идемпотентностью и повторной отправкой после ошибки Telegram.
 
@@ -57,7 +64,7 @@ python bench.py                        # бенчмарк детектора
 | `/start` | приветствие |
 | `/status` | текущие настройки и здоровье |
 | `/mode` | переключить presence / identity |
-| `/camera` | источник (0, rtsp/http; несколько через `\|`) |
+| `/camera` | источник (0, rtsp/http; несколько через `\|`, до 4) |
 | `/detector` | бэкенд: auto / yolo / yunet / motion |
 | `/device` | устройство: cpu / cuda / mps |
 | `/model` | выбрать YOLO-модель |
@@ -116,7 +123,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-Покрыты crypto, storage (WAL, prune, несколько эталонов), pipeline (вход/выход, identity по кропу, тихие часы, кэш превью, снятие тревоги поздним распознаванием), tracker, zones, каталог моделей, фабрика детекторов, remote (токен, fallback), голос (стейт-машина тревоги, TTS-заглушка) и бот (панель, доступ, callback-хендлеры).
+Покрыты crypto (AES-GCM, HMAC-подпись), storage (WAL, prune, несколько эталонов), pipeline (вход/выход, identity по кропу, тихие часы, кэш превью, снятие тревоги поздним распознаванием, несколько камер, per-camera настройки и параллельный инференс), tracker, zones, каталог моделей, фабрика детекторов, remote (токен, HMAC, лимиты, fallback), голос (стейт-машина тревоги, TTS-заглушка) и бот (панель, доступ, callback-хендлеры камер).
 
 ## Бенчмарк
 
@@ -129,9 +136,11 @@ python bench.py --backend yolo --model yolov8n.pt
 
 ## Remote-инференс
 
-Камера и инференс могут жить на разных машинах: кадр шифруется AES-256-GCM и уходит POST-ом, заголовок `X-DotEye-Token` - производный от ключа. HTTPS берётся из URL. Если сервер недоступен, клиент уходит на локальный детектор (если включён fallback) и шлёт алерт в чат.
+Камера и инференс могут жить на разных машинах: кадр шифруется AES-256-GCM и уходит POST-ом, каждый запрос подписан HMAC-SHA256 (метод/путь/время/nonce/тело) - защита от подделки и replay. HTTPS берётся из URL. Если сервер недоступен, клиент уходит на локальный детектор (если включён fallback) и шлёт алерт в чат.
 
-На сервере:
+VPN не обязателен: `RemoteClient` работает через `https://` с проверкой сертификата. Автодеплой remote-сервера на VPS - `python deploy/deploy_remote.py` (спрашивает домен/IP/ngrok, генерит `.env.remote` и `docker-compose.remote.yml` с Caddy для auto-TLS). Подробности - [deploy/README.md](deploy/README.md).
+
+На сервере (вручную, без Docker):
 
 ```bash
 export DOTEYE_CRYPTO_KEY=<тот же ключ, что у клиента>
@@ -176,7 +185,7 @@ docker compose up -d --build doteye
 doteye/
 ├── main.py        точка входа: пайплайн + бот + голос, SQLite outbox, shutdown
 ├── config.py      Settings из env, валидация и allowlist сетевых URL
-├── runtime.py     env + переопределения из чата (Storage)
+├── runtime.py     env + переопределения из чата (Storage), per-camera настройки
 ├── models.py      каталог YOLO-моделей для панели
 ├── bot.py         aiogram 3: панель, FSM, «это кто?», голос, уведомления
 ├── camera.py      вебка / RTSP / MJPEG, reader-поток и reconnect backoff
@@ -184,10 +193,10 @@ doteye/
 ├── tracker.py     IoU-трекер входа и выхода
 ├── zones.py       ROI кадра в координатах 0..1
 ├── annotate.py    кроп бокса и рамки на JPEG
-├── remote.py      ограниченный transport, AES-GCM, проверка ответов и лимиты
+├── remote.py      ограниченный transport, AES-GCM, HMAC+nonce, лимиты
 ├── recognizer.py  insightface (CPU/CUDA) + DummyRecognizer
-├── crypto.py      AES-256-GCM, auth_token для remote
-├── pipeline.py    камеры -> трек -> событие, кэш кадра, prune БД
+├── crypto.py      AES-256-GCM, HMAC-подпись remote-запросов
+├── pipeline.py    камеры -> трек -> событие, параллельный инференс, prune БД
 ├── audio.py       сирена WAV, winsound/aplay/afplay
 ├── tts.py         pyttsx3 / espeak-ng / dummy
 ├── voice.py       стейт-машина тревоги, фразы, ручная озвучка
@@ -203,11 +212,11 @@ Dockerfile         образ; docker-compose.yml; deploy/
 Поток данных:
 
 ```
-камеры (camera.py)
+камеры (camera.py) ── reader-поток на камеру
    │  кадр BGR (кэш для превью)
    ▼
 motion-gate + детектор  ── yolo / yunet / motion / remote
-   │  боксы, фильтр зон
+   │  боксы, фильтр зон   (параллельно: свой детектор на камеру)
    ▼
 IoU-трекер ── enter / active / exit
    │
@@ -223,12 +232,13 @@ IoU-трекер ── enter / active / exit
 
 Инварианты:
 
-- Настройки: `Settings` (env) + `Runtime` (чат поверх env).
+- Настройки: `Settings` (env) + `Runtime` (чат поверх env); per-camera значения - JSON поверх глобальных.
+- При `DOTEYE_CAMERA_PARALLEL=1` у каждой камеры свой детектор, свой recognizer (в identity) и воркер пула; сбой одной не роняет остальные.
 - Кадры и embeddings только зашифрованными (AES-256-GCM).
 - SQLite без ORM, WAL, индексы и периодический prune по `events_max` и `events_ttl_days`.
-- Сетевые URL проходят allowlist; production не допускает open access и небезопасный TLS.
+- Сетевые URL проходят allowlist; production не допускает open access, а remote-сервер отвергает plain HTTP вне loopback.
 - Уведомление сначала фиксируется в outbox, поэтому временный сбой Telegram не теряет событие.
-- Событие на появление/исчезновение трека, кулдаун гасит дребезг.
+- Событие на появление/исчезновение трека, кулдаун гасит дребезг; кулдаун, режим, тихие часы и уведомления можно задать на камеру.
 - Превью не вызывает второй `VideoCapture.read()`.
 - Детектор деградирует yolo -> yunet -> motion; remote падает в fallback, а не в «никого нет».
 - TTS и сирена не блокируют `pipeline.step()`; ручная озвучка из чата работает без охраны.

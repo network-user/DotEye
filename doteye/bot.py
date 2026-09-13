@@ -79,6 +79,17 @@ OUTBOX_MAX_RETRY_SECONDS = 3600
 TEST_SNAPSHOT_TTL_SECONDS = 60
 
 
+_MARKDOWN_ESCAPE_CHARS = set("_*[]()~`>#+-=|{}.!\\")
+
+
+def _escape_markdown(text: str) -> str:
+    """Экранировать спецсимволы legacy-Markdown для вставки произвольного текста."""
+    return "".join(
+        "\\" + char if char in _MARKDOWN_ESCAPE_CHARS else char
+        for char in text
+    )
+
+
 class CameraForm(StatesGroup):
     source = State()
     name = State()
@@ -1935,7 +1946,7 @@ async def cb_camera_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime)
     await state.set_state(CameraForm.source)
     await cq.message.answer(
         "Настройка камер\n\n"
-        f"Текущий список: {runtime.camera_source}\n\n"
+        f"Текущий список: {_escape_markdown(runtime.camera_source)}\n\n"
         "Отправьте один источник или до четырёх через |.\n"
         "• `0` - встроенная или USB-камера\n"
         "• `rtsp://host/stream` - поток IP-камеры\n"

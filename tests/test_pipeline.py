@@ -70,6 +70,26 @@ class FakeRecognizer(Recognizer):
         return self._distance
 
 
+class SequenceDetector(Detector):
+    """Выдаёт разные наборы боксов на каждом вызове - имитирует сбой трекинга."""
+
+    def __init__(self, steps: list[list[tuple[int, int, int, int]]]) -> None:
+        self.steps = steps
+        self.calls = 0
+
+    @property
+    def backend(self) -> str:
+        return "yolo"
+
+    def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+        boxes = self.steps[min(self.calls, len(self.steps) - 1)]
+        self.calls += 1
+        return boxes
+
+    def close(self) -> None:
+        pass
+
+
 class CountingRecognizer(FakeRecognizer):
     def __init__(self, distance: float) -> None:
         super().__init__(None, distance)
@@ -202,6 +222,50 @@ def test_identity_min_distance_across_embeddings(tmp_path: Path) -> None:
     pipe._storage.add_embedding(pid, pipe._crypto.encrypt(b"near"))
     events = pipe.step()
     assert events[0].person_name == "alice"
+
+
+def test_known_person_reentry_is_not_spammed(tmp_path: Path) -> None:
+    # Узнанный «alice» уже в кадре (первый бокс). Затем трекер после краткого
+    # сбоя «видит» того же человека как новый трек: повторный вход того же
+    # имени не должен рассылаться. Один человек, а не поток сообщений.
+    pipe = build(
+        tmp_path,
+        recognizer=FakeRecognizer("alice", 0.1),
+        detect_mode="identity",
+        face_threshold=0.4,
+        cooldown_seconds=0.0,
+    )
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    pipe._detector = SequenceDetector([
+        [(0, 0, 10, 10)],               # первый вход alice
+        [(0, 0, 10,10), (20, 0, 30, 10)],  # второй бокс = «новый» трек того же лица
+    ])
+    first = pipe.step()
+    assert len(first) == 1
+    assert first[0].person_name == "alice"
+
+    second = pipe.step()
+    assert second == []
+
+
+def test_known_person_reentry_notifies_when_mute_off(tmp_path: Path) -> None:
+    # С выключенным флагом то же повторное появление снова даёт событие.
+    pipe = build(
+        tmp_path,
+        recognizer=FakeRecognizer("alice", 0.1),
+        detect_mode="identity",
+        face_threshold=0.4,
+        cooldown_seconds=0.0,
+    )
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    pipe._runtime.mute_known_present = False
+    pipe._detector = SequenceDetector([
+        [(0, 0, 10, 10)],
+        [(20, 0, 30, 10)],
+    ])
+    pipe.step()
+    second = pipe.step()
+    assert second
 
 
 def test_identity_unknown_track_is_rate_limited(tmp_path: Path) -> None:
@@ -384,12 +448,12 @@ class MultiCameraPipeline(Pipeline):
     pass
 
 
-def _multi_build(tmp_path: Path, cameras, **over: object) -> Pipeline:
+def _multi_build(tmp_path: Path, cameras, recognizer: Recognizer | None = None, **over: object) -> Pipeline:
     settings = make_settings(**over)
     storage = Storage(tmp_path / "multi.db")
     runtime = Runtime(settings, storage)
     crypto = Crypto(generate_key_b64())
-    pipe = Pipeline(cameras, FakeDetector(), None, storage, crypto, runtime)  # type: ignore[arg-type]
+    pipe = Pipeline(cameras, FakeDetector(), recognizer, storage, crypto, runtime)  # type: ignore[arg-type]
     pipe.use_motion_gate = False
     return pipe
 
@@ -467,3 +531,36 @@ def test_parallel_detection_uses_worker_detectors(tmp_path: Path, monkeypatch) -
     # Второй шаг переиспользует воркеров, не создаёт новые.
     pipe.step()
     assert built.count("new") == 2
+
+
+def test_parallel_identity_uses_worker_recognizer(tmp_path: Path, monkeypatch) -> None:
+    built: list[str] = []
+
+    def fake_build_recognizer(device: str = "cpu"):
+        built.append(device)
+        return FakeRecognizer("alice", 0.1)
+
+    monkeypatch.setattr("doteye.pipeline.build_recognizer", fake_build_recognizer)
+    monkeypatch.setattr("doteye.pipeline.build_detector", lambda *a, **k: FakeDetector())
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = _multi_build(
+        tmp_path, cams, cooldown_seconds=0.0,
+        camera_parallel=True, detect_mode="identity",
+    )
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    events = pipe.step()
+    assert {event.person_name for event in events} == {"alice"}
+    # Каждой камере выдаётся свой recognizer.
+    assert set(pipe._worker_recognizers) == {"0", "1"}
+
+
+def test_parallel_disabled_uses_shared_recognizer(tmp_path: Path) -> None:
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = _multi_build(
+        tmp_path, cams, cooldown_seconds=0.0,
+        camera_parallel=False, detect_mode="identity",
+        recognizer=FakeRecognizer("alice", 0.1),
+    )
+    pipe._storage.upsert_person("alice", pipe._crypto.encrypt(b"ref"))
+    pipe.step()
+    assert pipe._worker_recognizers == {}
