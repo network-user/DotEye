@@ -14,5 +14,6 @@ onnxruntime>=1.16
 
 # Голос и тревога (SAPI на Windows, espeak на Linux)
 pyttsx3>=2.90
+pywin32>=306; sys_platform == 'win32'
 
 # Для разработки и тестов см. requirements-dev.txt

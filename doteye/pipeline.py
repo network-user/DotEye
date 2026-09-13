@@ -398,16 +398,14 @@ class Pipeline:
 
             update = tracker.update(boxes)
             preview_items: list[tuple[Box, str, tuple[int, int, int]]] = []
-            entered_ids = {t.id for t in update.entered}
 
             for track in update.entered:
                 track.zone = zone_by_box.get(track.box)
-                if identity:
-                    if self._should_identify(source, track, now) or self._voice_alarming():
-                        name, conf = self._identify_crop(frame, track.box)
-                        track.person_name = name
-                        track.confidence = conf
-                        track.identified = name is not None
+                if identity and (self._should_identify(source, track, now) or self._voice_alarming()):
+                    name, conf = self._identify_crop(frame, track.box)
+                    track.person_name = name
+                    track.confidence = conf
+                    track.identified = name is not None
                 entered_v.append(_voice_track(source, track))
                 key = self._track_key(source, track, "enter")
                 preview_items.append((
@@ -425,17 +423,17 @@ class Pipeline:
                     events.append(event)
 
             for track in update.active:
-                if track.id in entered_ids:
-                    active_v.append(_voice_track(source, track))
-                    continue
+                # Незнакомый трек догоняется распознаванием на следующих кадрах,
+                # пока лицо не попадёт в кадр чётко. Сработало - фиксируем имя,
+                # чтобы тревога снялась и прозвучало приветствие.
                 if identity and not track.identified and (
                     self._should_identify(source, track, now) or self._voice_alarming()
                 ):
                     name, conf = self._identify_crop(frame, track.box)
+                    track.person_name = name
+                    track.confidence = conf
+                    track.identified = name is not None
                     if name is not None:
-                        track.person_name = name
-                        track.confidence = conf
-                        track.identified = True
                         newly_v.append(_voice_track(source, track))
                 track.zone = zone_by_box.get(track.box, track.zone)
                 active_v.append(_voice_track(source, track))

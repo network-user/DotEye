@@ -74,8 +74,14 @@ def generate_siren(
     duration: float = 2.2,
     sample_rate: int = SAMPLE_RATE,
     volume: float = 0.45,
+    *,
+    fade_edges: bool = True,
 ) -> bytes:
-    """Двухтональная сирена (880/1180 Гц), без внешних файлов."""
+    """Двухтональная сирена (880/1180 Гц), без внешних файлов.
+
+    При fade_edges=False края не ослабляются - клип закольцовывается без щелчка
+    в SND_LOOP.
+    """
     duration = max(0.3, float(duration))
     volume = max(0.0, min(1.0, float(volume)))
     n = int(sample_rate * duration)
@@ -84,12 +90,45 @@ def generate_siren(
     high = ((t / period).astype(np.int32) % 2) == 1
     freq = np.where(high, 1180.0, 880.0).astype(np.float32)
     wave_f = np.sin(2.0 * np.pi * freq * t)
-    fade = max(1, int(0.02 * sample_rate))
-    envelope = np.ones(n, dtype=np.float32)
-    envelope[:fade] = np.linspace(0.0, 1.0, fade, dtype=np.float32)
-    envelope[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
-    pcm = (wave_f * envelope * (32767.0 * volume)).astype(np.int16)
+    if fade_edges:
+        fade = max(1, int(0.02 * sample_rate))
+        envelope = np.ones(n, dtype=np.float32)
+        envelope[:fade] = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        envelope[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
+        wave_f = wave_f * envelope
+    pcm = (wave_f * (32767.0 * volume)).astype(np.int16)
     return pcm16_to_wav(pcm, sample_rate)
+
+
+def mix_wav(*parts: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
+    """Смешать несколько WAV (PCM16) в один ролик по наибольшей длине.
+
+    Сумма сэмплов с клиппингом - сирена и речь звучат одновременно одним
+    потоком winsound.
+    """
+    pcm16_parts: list[np.ndarray] = []
+    length = 0
+    for data in parts:
+        if not is_wav(data):
+            continue
+        src = io.BytesIO(data)
+        try:
+            with wave.open(src, "rb") as wf:
+                if wf.getsampwidth() != 2:
+                    raise wave.Error
+                raw = wf.readframes(wf.getnframes())
+        except wave.Error:
+            continue
+        pcm = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+        length = max(length, pcm.size)
+        pcm16_parts.append(pcm)
+    if not pcm16_parts:
+        return silence_wav(0.05, sample_rate)
+    mix = np.zeros(length, dtype=np.int32)
+    for pcm in pcm16_parts:
+        mix[: pcm.size] += pcm
+    mix = np.clip(mix, -32768, 32767).astype(np.int16)
+    return pcm16_to_wav(mix, sample_rate)
 
 
 class Player(ABC):
@@ -107,6 +146,10 @@ class Player(ABC):
     def play_wav(self, data: bytes) -> None:
         ...
 
+    def play_loop(self, data: bytes) -> None:
+        """Зациклить WAV, пока не вызовут stop(). По умолчанию - разовый play."""
+        self.play_wav(data)
+
     @abstractmethod
     def stop(self) -> None:
         ...
@@ -115,6 +158,7 @@ class Player(ABC):
 class DummyPlayer(Player):
     def __init__(self) -> None:
         self.plays: list[int] = []
+        self.loops: list[int] = []
         self.stop_calls = 0
 
     @property
@@ -126,6 +170,9 @@ class DummyPlayer(Player):
 
     def play_wav(self, data: bytes) -> None:
         self.plays.append(len(data))
+
+    def play_loop(self, data: bytes) -> None:
+        self.loops.append(len(data))
 
     def stop(self) -> None:
         self.stop_calls += 1
@@ -154,13 +201,25 @@ class WinsoundPlayer(Player):
                 if self._path == path:
                     self._path = None
 
+    def play_loop(self, data: bytes) -> None:
+        import winsound
+
+        with self._lock:
+            if self._path is not None:
+                _unlink_quiet(self._path)
+            path = _write_temp_wav(data)
+            self._path = path
+        # SND_ASYNC | SND_LOOP зацикливает без блокировки; SND_PURGE в stop()
+        # останавливает и освобождает файл.
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
+
     def stop(self) -> None:
         import winsound
 
-        winsound.PlaySound(None, winsound.SND_PURGE)
         with self._lock:
             path = self._path
             self._path = None
+        winsound.PlaySound(None, winsound.SND_PURGE)
         if path:
             _unlink_quiet(path)
 

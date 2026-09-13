@@ -88,6 +88,11 @@ def _voice_title(voice: object) -> str:
     return name or vid
 
 
+def _is_russian_token(vid: str, name: str) -> bool:
+    blob = f"{vid} {name}".casefold()
+    return any(marker in blob for marker in RUSSIAN_VOICE_MARKERS)
+
+
 class DummyTTS(TTS):
     def __init__(self) -> None:
         self.texts: list[str] = []
@@ -208,6 +213,135 @@ class Pyttsx3TTS(TTS):
             return None
 
 
+class Sapi5TTS(TTS):
+    """Синтез напрямую через SAPI (win32com), минуя сломанный event-pump pyttsx3.
+
+    pyttsx3 использует свой цикл сообщений SAPI, который зависает на повторном
+    runAndWait() в том же потоке: первое «озвучивание» работает, следующее
+    блокируется навсегда. Прямой SpVoice.Speak() в файл стабилен при повторных
+    вызовах в одном выделенном потоке с инициализированным COM.
+    """
+
+    def __init__(self) -> None:
+        self._voice = None
+        self._stream = None
+        self._ok = False
+        self._error = ""
+        self._voices: list[tuple[str, str]] = []
+
+    @property
+    def name(self) -> str:
+        return "sapi5"
+
+    def available(self) -> bool:
+        return self._ok
+
+    @property
+    def last_error(self) -> str:
+        return self._error
+
+    def ensure(self) -> None:
+        if self._voice is not None or self._error:
+            return
+        try:
+            import pythoncom  # noqa: F401
+            import win32com.client
+        except ImportError as exc:
+            self._error = str(exc)
+            return
+        try:
+            pythoncom.CoInitialize()
+            voice = win32com.client.Dispatch("SAPI.SpVoice")
+            stream = win32com.client.Dispatch("SAPI.SpFileStream")
+            # Прогрев нужен: первый Speak асинхронный, дальше - синхронный.
+            self._voice = voice
+            self._stream = stream
+            self._ok = True
+            self._voices = self._collect_voices(voice)
+            self._pick_russian()
+        except Exception as exc:  # noqa: BLE001
+            self._error = str(exc)
+
+    def _collect_voices(self, voice: object) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        try:
+            for token in voice.GetVoices():
+                vid = str(token.Id)
+                name = str(token.GetDescription() or "")
+                if not vid:
+                    continue
+                title = name or vid
+                if _is_russian_token(vid, name):
+                    out.append((vid, title))
+        except Exception:  # noqa: BLE001
+            return []
+        return out
+
+    def _pick_russian(self) -> None:
+        for vid, _title in self._voices:
+            try:
+                token = next(t for t in self._voice.GetVoices() if str(t.Id) == vid)  # type: ignore[union-attr]
+                self._voice.Voice = token  # type: ignore[union-attr]
+                return
+            except Exception:  # noqa: BLE001
+                continue
+
+    def _set_voice(self, voice_id: str) -> None:
+        if not voice_id or self._voice is None:
+            return
+        try:
+            for token in self._voice.GetVoices():
+                if str(token.Id) == voice_id:
+                    self._voice.Voice = token
+                    return
+        except Exception:  # noqa: BLE001
+            return
+
+    def _set_rate(self, rate: float) -> None:
+        if self._voice is None:
+            return
+        # SAPI Rate - от -10 до 10; используем плавную шкалу.
+        value = int(round(max(-10.0, min(10.0, (rate - 1.0) * 5.0))))
+        try:
+            self._voice.Rate = value
+        except Exception:  # noqa: BLE001
+            return
+
+    def list_voices(self) -> list[tuple[str, str]]:
+        self.ensure()
+        return list(self._voices)
+
+    def synthesize(
+        self, text: str, rate: float = 1.0, voice_id: str = ""
+    ) -> bytes | None:
+        self.ensure()
+        if self._voice is None or self._stream is None:
+            return None
+        path = ""
+        try:
+            if voice_id:
+                self._set_voice(voice_id)
+            self._set_rate(rate)
+            fd, path = tempfile.mkstemp(suffix=".wav", prefix="doteye_tts_")
+            os.close(fd)
+            stream = self._stream
+            stream.Open(path, 3)  # SSFMCreateForWrite
+            try:
+                self._voice.AudioOutputStream = stream
+                self._voice.Speak(text)
+            finally:
+                self._voice.AudioOutputStream = None
+                stream.Close()
+            data = Path(path).read_bytes()
+            return data if is_wav(data) and len(data) > 44 else None
+        except Exception as exc:  # noqa: BLE001
+            self._error = str(exc)
+            return None
+        finally:
+            if path:
+                Path(path).unlink(missing_ok=True)
+
+
 class EspeakTTS(TTS):
     def __init__(self) -> None:
         self._bin = shutil.which("espeak-ng") or shutil.which("espeak") or ""
@@ -313,4 +447,4 @@ class ChainTTS(TTS):
 
 
 def build_tts() -> TTS:
-    return ChainTTS([Pyttsx3TTS(), EspeakTTS(), DummyTTS()])
+    return ChainTTS([Sapi5TTS(), Pyttsx3TTS(), EspeakTTS(), DummyTTS()])

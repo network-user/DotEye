@@ -17,6 +17,7 @@ from doteye.audio import (
     Player,
     build_player,
     generate_siren,
+    mix_wav,
     scale_wav_volume,
 )
 from doteye.tts import TTS, build_tts
@@ -25,8 +26,8 @@ if TYPE_CHECKING:
     from doteye.runtime import Runtime
 
 DEFAULT_PHRASES: dict[str, str] = {
-    "stranger": "Внимание. Обнаружен незнакомец.",
-    "repeat": "Покиньте помещение немедленно.",
+    "stranger": "Внимание, посторонний человек. Покиньте помещение!",
+    "repeat": "Покиньте помещение.",
     "cleared": "Тревога снята.",
     "welcome": "Добро пожаловать, {name}.",
     "goodbye": "До свидания, {name}.",
@@ -130,6 +131,13 @@ class VoiceEngine:
         self._voices: list[tuple[str, str]] | None = None
         self.last_phrase = ""
         self.last_error = ""
+        # Непрерывная сирена идёт отдельным потоком, в то время как работник
+        # синтезирует речь (COM SAPI привязан к своему потоку).
+        self._siren_lock = threading.Lock()
+        self._siren_condition = threading.Condition()
+        self._siren_active = False
+        self._siren_clip: bytes | None = None
+        self._siren_thread: threading.Thread | None = None
 
     @property
     def alarming(self) -> bool:
@@ -166,6 +174,10 @@ class VoiceEngine:
             target=self._worker, name="doteye-voice", daemon=True
         )
         self._thread.start()
+        self._siren_thread = threading.Thread(
+            target=self._siren_worker, name="doteye-siren", daemon=True
+        )
+        self._siren_thread.start()
 
     def close(self) -> None:
         self._stop.set()
@@ -173,9 +185,15 @@ class VoiceEngine:
             self._player.stop()
         except Exception:
             pass
+        with self._siren_condition:
+            self._siren_active = False
+            self._siren_condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._siren_thread is not None:
+            self._siren_thread.join(timeout=2.0)
+            self._siren_thread = None
 
     def list_voices(self, timeout: float = 8.0) -> list[tuple[str, str]]:
         if self._voices is not None:
@@ -310,7 +328,6 @@ class VoiceEngine:
                         kind="speech", text=self._phrase("presence"),
                     ))
 
-            self._maybe_repeat(now)
         return notices
 
     def drain(self) -> None:
@@ -395,9 +412,8 @@ class VoiceEngine:
             self._last_loop_at = now
             self._empty_since = None
             text = phrase or self._phrase("stranger")
-            self._enqueue(VoiceJob(
-                kind="alarm", text=text, siren=True, interrupt=True, voice_slot="alarm",
-            ))
+            # Запускаем сирену немедленно, не дожидаясь синтеза речи.
+            self._start_siren(text)
             where = f" камера {source}" if source else ""
             zone_s = f", зона {zone}" if zone else ""
             return VoiceNotice(
@@ -416,10 +432,7 @@ class VoiceEngine:
             return None
         self._alarming = False
         self._empty_since = None
-        try:
-            self._player.stop()
-        except Exception:
-            pass
+        self._stop_siren()
         who_s = who or ""
         if reason == "known" and who_s:
             caption = f"DotEye: тревога снята ({who_s})."
@@ -449,20 +462,77 @@ class VoiceEngine:
         # только вручную либо после успешного распознавания человека.
         return None
 
-    def _maybe_repeat(self, now: float) -> None:
-        if not self._alarming:
-            return
-        if not self._runtime.voice_enabled:
-            return
-        if not self._queue.empty():
-            return
-        repeat = max(2.0, self._runtime.voice_repeat_seconds)
-        if now - self._last_loop_at < repeat:
-            return
-        self._last_loop_at = now
-        self._enqueue(VoiceJob(
-            kind="alarm", text=self._phrase("repeat"), siren=True, voice_slot="alarm",
-        ))
+    # -- непрерывная сирена --------------------------------------------
+
+    def _start_siren(self, text: str) -> None:
+        """Собрать клип «сирена + фраза» и запустить его в отдельном потоке.
+
+        Синтез речи идёт в воркере (там инициализирован COM), поэтому сначала
+        ставится задача в очередь, а зацикленная сирена запускается сразу,
+        без фразы, пока фраза не готова.
+        """
+        if self._can_siren():
+            siren = generate_siren(duration=3.0, volume=0.5, fade_edges=False)
+            self._set_siren_clip(scale_wav_volume(siren, self._volume()))
+            self._activate_siren()
+        if self._runtime.voice_speech_enabled:
+            # Пока синтез не готов, поверх уже звучит чистая сирена. Когда
+            # фраза синтезирована, клип пересобирается с голосом поверх.
+            self._enqueue(VoiceJob(
+                kind="alarm", text=text, voice_slot="alarm",
+            ))
+
+    def _activate_siren(self) -> None:
+        with self._siren_condition:
+            self._siren_active = True
+            self._siren_condition.notify_all()
+
+    def _stop_siren(self) -> None:
+        with self._siren_condition:
+            self._siren_active = False
+            self._siren_clip = None
+            self._siren_condition.notify_all()
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+
+    def _set_siren_clip(self, clip: bytes | None) -> None:
+        with self._siren_condition:
+            self._siren_clip = clip
+            self._siren_condition.notify_all()
+
+    def _siren_worker(self) -> None:
+        while not self._stop.is_set():
+            with self._siren_condition:
+                while not self._siren_active and not self._stop.is_set():
+                    self._siren_condition.wait(0.2)
+                if self._stop.is_set():
+                    break
+                clip = self._siren_clip
+            if clip is None:
+                continue
+            try:
+                self._player.play_loop(clip)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[voice] siren play: {exc}")
+            # play_loop не блокирует (async loop); ждём снятия или смены клипа.
+            with self._siren_condition:
+                cur = self._siren_clip
+                while self._siren_active and cur == self._siren_clip and not self._stop.is_set():
+                    self._siren_condition.wait(0.2)
+            # Если тревога ещё активна, но клип сменился - перезапускаем петлю.
+            # Если уже снята, stop() уже вызван _stop_siren, не трогаем звук.
+            with self._siren_condition:
+                restart = self._siren_active
+            if restart:
+                try:
+                    self._player.stop()
+                except Exception:
+                    pass
+
+    def _volume(self) -> float:
+        return max(0.0, min(1.0, self._runtime.voice_volume))
 
     def _cooldown_ok(self, key: str, now: float) -> bool:
         gap = max(0.0, self._runtime.voice_cooldown_seconds)
@@ -512,8 +582,6 @@ class VoiceEngine:
             try:
                 job = self._queue.get(timeout=0.2)
             except queue.Empty:
-                with self._lock:
-                    self._maybe_repeat(time.time())
                 continue
             if job.kind == "list_voices":
                 try:
@@ -533,9 +601,18 @@ class VoiceEngine:
         print("[voice] stopped")
 
     def _play_job(self, job: VoiceJob) -> None:
-        volume = max(0.0, min(1.0, self._runtime.voice_volume))
+        volume = self._volume()
         rate = max(0.4, min(2.5, self._runtime.voice_rate))
         voice_id = job.voice_id or self._voice_id(job.voice_slot)
+
+        # Тревога: собрать клип «сирена + фраза» и зациклить, пока не снимут.
+        if job.kind == "alarm":
+            wav = self._tts.synthesize(job.text, rate=rate, voice_id=voice_id)
+            if wav:
+                self._build_alarm_clip(wav, volume)
+                print(f"[voice] alarm: {job.text[:80]}")
+            return
+
         want_siren = job.siren and self._can_siren()
         preview = job.kind == "manual" and job.force
         want_speech = bool(job.text) and (
@@ -557,6 +634,25 @@ class VoiceEngine:
                 detail = self._tts.last_error or "синтезатор не вернул аудио"
                 self.last_error = f"Синтез речи недоступен: {detail}"
                 print(f"[voice] tts пуст: {job.text[:80]}")
+
+    def _build_alarm_clip(self, speech_wav: bytes, volume: float) -> None:
+        """Пересобрать зацикленный ролик: непрерывная сирена + голос поверх."""
+        import wave
+        import io as _io
+
+        speech_len = 0.0
+        try:
+            with wave.open(_io.BytesIO(speech_wav), "rb") as wf:
+                speech_len = wf.getnframes() / max(1, wf.getframerate())
+        except wave.Error:
+            speech_len = 2.0
+        total = max(3.0, speech_len + 0.9)
+        siren = generate_siren(duration=total, volume=0.4, fade_edges=False)
+        mixed = mix_wav(
+            scale_wav_volume(siren, volume),
+            scale_wav_volume(speech_wav, volume),
+        )
+        self._set_siren_clip(mixed)
 
     def _voice_id(self, slot: str) -> str:
         if slot == "alarm":

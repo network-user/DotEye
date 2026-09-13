@@ -22,10 +22,57 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
+from doteye.tracker import iou
+
 if TYPE_CHECKING:
     from doteye.crypto import Crypto
 
 CLASS_PERSON = 0
+
+
+def _merge_person_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    shape: tuple[int, ...],
+) -> list[tuple[int, int, int, int]]:
+    """Убрать осколки и объединить близкие боксы одного человека.
+
+    YOLO без жёсткого NMS выдаёт кучу мелких квадратов по частям тела. Здесь
+    отсеиваются мизерные области (менее 0.4% кадра) и склеиваются сильно
+    перекрывающиеся соседи, чтобы в кадре остался один цельный прямоугольник
+    на человека.
+    """
+    height, width = int(shape[0]), int(shape[1])
+    min_area = width * height * 0.004
+    filtered: list[tuple[int, int, int, int]] = []
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if (x2 - x1) * (y2 - y1) < min_area:
+            continue
+        filtered.append((int(x1), int(y1), int(x2), int(y2)))
+    if not filtered:
+        return []
+
+    merged: list[tuple[int, int, int, int]] = []
+    consumed: set[int] = set()
+    for i, box in enumerate(filtered):
+        if i in consumed:
+            continue
+        group = [box]
+        consumed.add(i)
+        for j in range(i + 1, len(filtered)):
+            if j in consumed:
+                continue
+            if iou(box, filtered[j]) >= 0.5:
+                group.append(filtered[j])
+                consumed.add(j)
+        x1 = min(b[0] for b in group)
+        y1 = min(b[1] for b in group)
+        x2 = max(b[2] for b in group)
+        y2 = max(b[3] for b in group)
+        merged.append((x1, y1, x2, y2))
+    return merged
 
 
 class Detector(ABC):
@@ -66,6 +113,8 @@ class LocalDetector(Detector):
             "verbose": False,
             "device": self._device,
             "imgsz": self._imgsz,
+            "iou": 0.6,
+            "max_det": 20,
         }
         if self._device == "cuda":
             kwargs["half"] = True
@@ -75,7 +124,7 @@ class LocalDetector(Detector):
             for b in r.boxes.xyxy.cpu().numpy():
                 boxes.append(tuple(int(v) for v in b))
         self.last_error = None
-        return boxes
+        return _merge_person_boxes(boxes, frame.shape[:2])
 
     def close(self) -> None:
         del self._model

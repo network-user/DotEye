@@ -571,6 +571,7 @@ def _event_keyboard(event_id: int, unknown_enter: bool, storage: Storage) -> Inl
     if unknown_enter:
         rows.append([InlineKeyboardButton(text="Это кто?", callback_data=f"event:who:{event_id}")])
     rows.append([InlineKeyboardButton(text="Добавить заметку", callback_data=f"event:note:{event_id}")])
+    rows.append([InlineKeyboardButton(text="Вернуться в панель", callback_data="panel:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2492,6 +2493,12 @@ async def send_notifications(
                                 callback_data="voice:dismiss",
                             )
                         ])
+                    rows.append([
+                        InlineKeyboardButton(
+                            text="Вернуться в панель",
+                            callback_data="panel:open",
+                        )
+                    ])
                     if rows:
                         markup = InlineKeyboardMarkup(inline_keyboard=rows)
                     jpeg = row["jpeg"]
