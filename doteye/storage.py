@@ -63,12 +63,19 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     UNIQUE(event_id, admin_id)
 );
 
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload BLOB NOT NULL,       -- AES-GCM: только обезличенный тип действия
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_person_embeddings_person_id
     ON person_embeddings(person_id);
 CREATE INDEX IF NOT EXISTS idx_events_detected_at ON events(detected_at);
 CREATE INDEX IF NOT EXISTS idx_events_person_id ON events(person_id);
 CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
     ON notification_outbox(sent_at, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 """
 
 _EVENT_COLUMNS = {
@@ -325,6 +332,31 @@ class Storage:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
             return int(row["n"]) if row else 0
+
+    # -- encrypted audit log ------------------------------------------
+
+    def add_audit_entry(self, encrypted_payload: bytes, keep: int = 1000) -> None:
+        """Сохранить зашифрованный, обезличенный тип действия администратора."""
+        if not encrypted_payload:
+            raise ValueError("audit payload must not be empty")
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit_log (payload, created_at) VALUES (?, ?)",
+                (encrypted_payload, _now()),
+            )
+            self._conn.execute(
+                "DELETE FROM audit_log WHERE id < COALESCE("
+                "(SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET ?), 0)",
+                (max(1, int(keep)) - 1,),
+            )
+            self._conn.commit()
+
+    def recent_audit_entries(self, limit: int = 30) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT id, payload, created_at FROM audit_log ORDER BY id DESC LIMIT ?",
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
 
     # -- durable notification outbox -----------------------------------
 

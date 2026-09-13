@@ -59,6 +59,7 @@ HELP = (
     "/remove - удалить человека\n\n"
     "События и голос\n"
     "/events - последние события\n"
+    "/audit - журнал действий без содержимого сообщений\n"
     "/say - сказать вслух через динамики\n"
     "/alarm - ручная тревога (/alarm off - снять)\n\n"
     "Прочее\n"
@@ -69,6 +70,7 @@ HELP = (
 DETECTORS = ["auto", "yolo", "yunet", "motion"]
 DEVICES = ["cpu", "cuda", "mps"]
 EVENTS_PAGE = 3
+AUDIT_PAGE = 30
 OUTBOX_POLL_SECONDS = 1.0
 OUTBOX_BATCH_SIZE = 20
 OUTBOX_MAX_RETRY_SECONDS = 3600
@@ -167,12 +169,12 @@ def _camera_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, source in enumerate(runtime.camera_source.split("|"), start=0):
         rows.append([InlineKeyboardButton(
-            text=f"📷 Камера {index + 1}: {_camera_title(source)}",
+            text=f"Камера {index + 1}: {_camera_title(source)}",
             callback_data=f"camera:view:{index}",
         )])
     rows.extend([
-        [InlineKeyboardButton(text="➕ Изменить список камер", callback_data="camera:edit")],
-        [InlineKeyboardButton(text="❓ Инструкция и помощь", callback_data="camera:help")],
+        [InlineKeyboardButton(text="Изменить список камер", callback_data="camera:edit")],
+        [InlineKeyboardButton(text="Инструкция и помощь", callback_data="camera:help")],
         [InlineKeyboardButton(text="◀ Назад", callback_data="panel:open")],
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -196,7 +198,7 @@ def _camera_info_text(source: str, index: int, pipeline: Pipeline | None) -> str
         reconnects = int(info["reconnects"])
         error = info["last_error"]
     lines = [
-        f"📷 Камера {index + 1}",
+        f"Камера {index + 1}",
         f"Тип: {_camera_title(source)}",
         f"Источник: {_camera_source_text(source)}",
         f"Статус: {status}",
@@ -211,9 +213,9 @@ def _camera_info_text(source: str, index: int, pipeline: Pipeline | None) -> str
 
 def _camera_detail_keyboard(index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📸 Тестовый снимок", callback_data=f"camera:test:{index}")],
-        [InlineKeyboardButton(text="✏️ Изменить список", callback_data="camera:edit")],
-        [InlineKeyboardButton(text="❓ Если не работает", callback_data="camera:help")],
+        [InlineKeyboardButton(text="Тестовый снимок", callback_data=f"camera:test:{index}")],
+        [InlineKeyboardButton(text="Изменить список", callback_data="camera:edit")],
+        [InlineKeyboardButton(text="Если не работает", callback_data="camera:help")],
         [InlineKeyboardButton(text="◀ К списку камер", callback_data="panel:camera")],
     ])
 
@@ -262,7 +264,27 @@ class AccessMiddleware(BaseMiddleware):
         ):
             await event.answer("Нет доступа.", show_alert=True)
             return None
+        self._write_audit(event)
         return await handler(event, data)
+
+    def _write_audit(self, event: TelegramObject) -> None:
+        """Пишет только тип операции, никогда текст, имя, id или изображение."""
+        if self._crypto is None:
+            return
+        if isinstance(event, CallbackQuery):
+            parts = (event.data or "").split(":")
+            label = "callback:" + ":".join(parts[:2])
+        elif isinstance(event, Message):
+            text = (event.text or "").strip()
+            label = "command:" + text.split(maxsplit=1)[0] if text.startswith("/") else "message_input"
+            if getattr(event, "photo", None) or getattr(event, "document", None):
+                label = "image_input"
+        else:
+            return
+        try:
+            self._storage.add_audit_entry(self._crypto.encrypt(label.encode("utf-8")))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[audit] write: {exc}")
 
 
 router = Router()
@@ -308,6 +330,7 @@ def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> Inlin
             InlineKeyboardButton(text="События", callback_data="panel:events"),
             InlineKeyboardButton(text="Люди", callback_data="panel:people"),
         ],
+        [InlineKeyboardButton(text="Журнал действий", callback_data="panel:audit")],
         [
             InlineKeyboardButton(text="Превью", callback_data="panel:snapshot"),
             InlineKeyboardButton(text="Камера", callback_data="panel:camera"),
@@ -838,6 +861,25 @@ async def _send_events_page(
         )
 
 
+async def _send_audit_log(message: Message, storage: Storage, crypto: Crypto | None) -> None:
+    """Показать журнал без возможности вывести незашифрованные данные."""
+    if crypto is None:
+        await message.answer("Журнал недоступен: ключ шифрования не задан.")
+        return
+    rows = storage.recent_audit_entries(AUDIT_PAGE)
+    if not rows:
+        await message.answer("Журнал действий пока пуст.", reply_markup=_back_kb())
+        return
+    lines = ["Журнал действий. Содержимое сообщений, имена и фото не записываются."]
+    for row in rows:
+        try:
+            action = crypto.decrypt(bytes(row["payload"])).decode("utf-8")
+        except Exception:
+            action = "повреждённая зашифрованная запись"
+        lines.append(f"{row['created_at']} - {action}")
+    await message.answer("\n".join(lines), reply_markup=_back_kb())
+
+
 # -- команды ------------------------------------------------------------
 
 @router.message(CommandStart())
@@ -895,7 +937,7 @@ async def cb_open(cq: CallbackQuery, runtime: Runtime,
 @router.callback_query(F.data == "panel:tune")
 async def cb_tune(cq: CallbackQuery, runtime: Runtime) -> None:
     await cq.message.edit_text(
-        "⚙️ Тонкая настройка детекции, камер, зон и уведомлений:",
+        "Тонкая настройка детекции, камер, зон и уведомлений:",
         reply_markup=_tune_keyboard(runtime),
     )
     await cq.answer()
@@ -936,7 +978,7 @@ async def cb_arm(cq: CallbackQuery, runtime: Runtime,
 async def cb_exit_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.notify_exit = not runtime.notify_exit
     await cq.message.edit_text(
-        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+        "Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
     )
     await cq.answer("Выход: " + ("вкл" if runtime.notify_exit else "выкл"))
 
@@ -945,7 +987,7 @@ async def cb_exit_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
 async def cb_privacy_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.privacy_outbound = not runtime.privacy_outbound
     await cq.message.edit_text(
-        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+        "Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
     )
     await cq.answer("Приватные кадры: " + ("вкл" if runtime.privacy_outbound else "выкл"))
 
@@ -963,7 +1005,7 @@ async def cb_mode(
 async def cb_detector(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.detector_backend = _next_item(DETECTORS, runtime.detector_backend)
     await cq.message.edit_text(
-        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+        "Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
     )
     await cq.answer(f"Детектор: {runtime.detector_backend}")
 
@@ -972,7 +1014,7 @@ async def cb_detector(cq: CallbackQuery, runtime: Runtime) -> None:
 async def cb_device(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.device = _next_item(DEVICES, runtime.device)
     await cq.message.edit_text(
-        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+        "Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
     )
     await cq.answer(f"Устройство: {runtime.device}")
 
@@ -1115,6 +1157,12 @@ async def cb_events(cq: CallbackQuery, storage: Storage,
                     crypto: Crypto | None, runtime: Runtime) -> None:
     await cq.answer()
     await _send_events_page(cq.message, storage, crypto, runtime, 0)
+
+
+@router.callback_query(F.data == "panel:audit")
+async def cb_audit(cq: CallbackQuery, storage: Storage, crypto: Crypto | None) -> None:
+    await cq.answer()
+    await _send_audit_log(cq.message, storage, crypto)
 
 
 @router.callback_query(F.data.startswith("events:page:"))
@@ -1377,7 +1425,7 @@ async def cb_voice_dismiss(cq: CallbackQuery, runtime: Runtime,
 @router.callback_query(F.data == "panel:camera")
 async def cb_camera(cq: CallbackQuery, runtime: Runtime) -> None:
     await cq.message.edit_text(
-        "📷 Камеры\nВыберите камеру, чтобы посмотреть состояние и запросить "
+        "Камеры\nВыберите камеру, чтобы посмотреть состояние и запросить "
         "одноразовый тестовый снимок.",
         reply_markup=_camera_keyboard(runtime),
     )
@@ -1434,7 +1482,7 @@ async def cb_camera_test(cq: CallbackQuery, runtime: Runtime,
 async def cb_camera_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
     await state.set_state(CameraForm.source)
     await cq.message.answer(
-        "✏️ Настройка камер\n\n"
+        "Настройка камер\n\n"
         f"Текущий список: {runtime.camera_source}\n\n"
         "Отправьте один источник или до четырёх через |.\n"
         "• `0` - встроенная или USB-камера\n"
@@ -1444,7 +1492,7 @@ async def cb_camera_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime)
         "Нажмите «Инструкция», если не знаете адрес потока.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❓ Инструкция", callback_data="camera:help")],
+            [InlineKeyboardButton(text="Инструкция", callback_data="camera:help")],
             [InlineKeyboardButton(text="Отмена", callback_data="camera:cancel")],
         ]),
     )
@@ -1454,7 +1502,7 @@ async def cb_camera_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime)
 @router.callback_query(F.data == "camera:help")
 async def cb_camera_help(cq: CallbackQuery) -> None:
     await cq.message.answer(
-        "❓ Подсказки по подключению\n\n"
+        "Подсказки по подключению\n\n"
         "1. Для USB-камеры начните с `0`; если камер несколько, попробуйте `1`.\n"
         "2. Для IP-камеры используйте адрес RTSP или MJPEG из её приложения/инструкции. "
         "Камера и DotEye должны быть в одной локальной сети.\n"
@@ -1464,7 +1512,7 @@ async def cb_camera_help(cq: CallbackQuery) -> None:
         "Если кадра нет, проверьте питание камеры, адрес потока и доступность хоста из "
         "устройства с DotEye. Не публикуйте поток камеры в интернет.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Ввести источник", callback_data="camera:edit")],
+            [InlineKeyboardButton(text="Ввести источник", callback_data="camera:edit")],
             [InlineKeyboardButton(text="◀ К камерам", callback_data="panel:camera")],
         ]),
     )
@@ -1482,7 +1530,7 @@ async def cb_camera_cancel(cq: CallbackQuery, state: FSMContext, runtime: Runtim
 async def cb_remote(cq: CallbackQuery, runtime: Runtime, state: FSMContext) -> None:
     if runtime.remote_processing:
         runtime.remote_processing = False
-        await cq.message.edit_text("⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime))
+        await cq.message.edit_text("Тонкая настройка:", reply_markup=_tune_keyboard(runtime))
         await cq.answer("Remote выкл")
         return
     if not runtime.remote_url:
@@ -1492,7 +1540,7 @@ async def cb_remote(cq: CallbackQuery, runtime: Runtime, state: FSMContext) -> N
         await cq.answer()
         return
     runtime.remote_processing = True
-    await cq.message.edit_text("⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime))
+    await cq.message.edit_text("Тонкая настройка:", reply_markup=_tune_keyboard(runtime))
     await cq.answer("Remote вкл")
 
 
@@ -1964,6 +2012,11 @@ async def cmd_events(
     message: Message, storage: Storage, crypto: Crypto | None, runtime: Runtime
 ) -> None:
     await _send_events_page(message, storage, crypto, runtime, 0)
+
+
+@router.message(Command("audit"))
+async def cmd_audit(message: Message, storage: Storage, crypto: Crypto | None) -> None:
+    await _send_audit_log(message, storage, crypto)
 
 
 @router.message(Command("say"))

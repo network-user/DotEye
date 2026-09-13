@@ -56,6 +56,17 @@ def test_events_join_person(tmp_path: Path) -> None:
     st.close()
 
 
+def test_encrypted_audit_entries_are_retained_without_plaintext(tmp_path: Path) -> None:
+    st = Storage(tmp_path / "audit.db")
+    st.add_audit_entry(b"encrypted-action", keep=2)
+    st.add_audit_entry(b"encrypted-action-2", keep=2)
+    st.add_audit_entry(b"encrypted-action-3", keep=2)
+    rows = st.recent_audit_entries()
+    assert len(rows) == 2
+    assert rows[0]["payload"] == b"encrypted-action-3"
+    st.close()
+
+
 def test_migration_adds_confidence(tmp_path: Path) -> None:
     import sqlite3
 
