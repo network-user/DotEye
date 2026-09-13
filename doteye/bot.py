@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 
 from doteye import models
-from doteye.annotate import crop_box, encode_jpeg, redact_frame
+from doteye.annotate import crop_box, encode_jpeg, privacy_frame
 from doteye.config import ConfigurationError, Settings
 from doteye.crypto import Crypto
 from doteye.pipeline import Pipeline
@@ -329,14 +329,9 @@ def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> Inlin
             InlineKeyboardButton(text="События", callback_data="panel:events"),
             InlineKeyboardButton(text="Люди", callback_data="panel:people"),
         ],
-        [InlineKeyboardButton(text="Журнал действий", callback_data="panel:audit")],
         [
             InlineKeyboardButton(text="Превью", callback_data="panel:snapshot"),
             InlineKeyboardButton(text="Камера", callback_data="panel:camera"),
-        ],
-        [
-            InlineKeyboardButton(text="Детекция", callback_data="panel:detector"),
-            InlineKeyboardButton(text="Зоны", callback_data="panel:zones"),
         ],
         [
             InlineKeyboardButton(
@@ -360,7 +355,7 @@ def _tune_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     dev_next = _next_item(DEVICES, runtime.device)
     quiet = runtime.quiet_hours or "выкл"
     remote = _on(runtime.remote_processing)
-    privacy = _on(runtime.privacy_outbound)
+    privacy = _PRIVACY_LABELS[runtime.privacy_mode]
     exit_s = _on(runtime.notify_exit)
     rows = [
         [
@@ -408,10 +403,38 @@ def _tune_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"Remote: {remote}", callback_data="panel:remote"),
         ],
         [
+            InlineKeyboardButton(text="Зоны", callback_data="panel:zones"),
+            InlineKeyboardButton(text="Журнал действий", callback_data="panel:audit"),
+        ],
+        [
             InlineKeyboardButton(text="Голос", callback_data="voice:open"),
             InlineKeyboardButton(text="◀ Назад", callback_data="panel:open"),
         ],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+_PRIVACY_MODES = ["off", "person", "face", "silhouette", "all"]
+_PRIVACY_LABELS = {
+    "off": "выкл", "person": "человек", "face": "лицо",
+    "silhouette": "силуэт", "all": "весь кадр",
+}
+
+
+def _privacy_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+    rows = []
+    for mode in _PRIVACY_MODES:
+        current = " ✓" if runtime.privacy_mode == mode else ""
+        rows.append([InlineKeyboardButton(
+            text=_PRIVACY_LABELS[mode] + current, callback_data=f"privacy:mode:{mode}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton(
+            text=f"Пикселизация: {runtime.privacy_blocks} блоков",
+            callback_data="privacy:blocks",
+        )],
+        [InlineKeyboardButton(text="◀ К настройкам", callback_data="panel:tune")],
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -509,6 +532,14 @@ def _who_keyboard(event_id: int, storage: Storage) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="Новый человек", callback_data=f"event:new:{event_id}")
     ])
     rows.append([InlineKeyboardButton(text="Назад", callback_data="panel:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _event_keyboard(event_id: int, unknown_enter: bool, storage: Storage) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if unknown_enter:
+        rows.append([InlineKeyboardButton(text="Это кто?", callback_data=f"event:who:{event_id}")])
+    rows.append([InlineKeyboardButton(text="Добавить заметку", callback_data=f"event:note:{event_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -697,11 +728,15 @@ def _voices_keyboard(
     current = str(getattr(runtime, field))
     for i, (vid, title) in enumerate(voices[:15]):
         mark = " [текущий]" if vid == current else ""
+        preview = " ▶" if i == 0 else ""
         rows.append([
             InlineKeyboardButton(
-                text=f"{_short_phrase(title, 48)}{mark}",
+                text=f"{_short_phrase(title, 40)}{mark}{preview}",
                 callback_data=f"voice:vset:{slot}:{i}",
-            )
+            ),
+            InlineKeyboardButton(
+                text="🔊", callback_data=f"voice:prev:{slot}:{i}"
+            ),
         ])
     rows.append([
         InlineKeyboardButton(text="Использовать обычный голос", callback_data=f"voice:vset:{slot}:-1")
@@ -854,17 +889,19 @@ async def _send_events_page(
         conf = f", conf={row['confidence']:.2f}" if row["confidence"] else ""
         cam = f"\nкамера {row['camera_source']}" if row["camera_source"] else ""
         zone = f", зона {row['zone']}" if row["zone"] else ""
-        if runtime.privacy_outbound:
+        note = ""
+        if row["note"]:
+            try:
+                note_text = crypto.decrypt(bytes(row["note"])).decode("utf-8")
+                note = f"\nзаметка: {note_text}"
+            except Exception:
+                note = "\nзаметка: недоступна"
+        if runtime.privacy_mode != "off":
             caption = f"{row['detected_at']}\nобнаружен человек"
         else:
             caption = f"{row['detected_at']}\n{verb} {who}{conf}{cam}{zone}"
-        markup = None
-        if row["person_name"] is None and kind == "enter":
-            markup = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Это кто?", callback_data=f"event:who:{row['id']}"
-                )
-            ]])
+        caption += note
+        markup = _event_keyboard(int(row["id"]), row["person_name"] is None and kind == "enter", storage)
         if not row["frame"]:
             await message.answer(caption, reply_markup=markup)
             continue
@@ -873,12 +910,14 @@ async def _send_events_page(
         except Exception:
             await message.answer(caption + "\n(кадр не расшифрован)")
             continue
-        if runtime.privacy_outbound:
+        if runtime.privacy_mode != "off":
             frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 await message.answer(caption + "\n(кадр повреждён)", reply_markup=markup)
                 continue
-            jpeg = encode_jpeg(redact_frame(frame, _event_boxes(row)), runtime.jpeg_quality)
+            jpeg = encode_jpeg(privacy_frame(
+                frame, _event_boxes(row), runtime.privacy_mode, runtime.privacy_blocks,
+            ), runtime.jpeg_quality)
             if jpeg is None:
                 await message.answer(caption + "\n(кадр не подготовлен)", reply_markup=markup)
                 continue
@@ -1012,11 +1051,40 @@ async def cb_exit_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
 
 @router.callback_query(F.data == "panel:privacy")
 async def cb_privacy_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
-    runtime.privacy_outbound = not runtime.privacy_outbound
     await cq.message.edit_text(
-        "Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+        "Приватность кадров в Telegram\n\n"
+        "Выбери, что скрывать. В режиме «лицо», если лицо не найдено, "
+        "пикселизируется весь человек - кадр не уйдёт с открытым лицом.\n"
+        "Меньше блоков - сильнее пикселизация.",
+        reply_markup=_privacy_keyboard(runtime),
     )
-    await cq.answer("Приватные кадры: " + ("вкл" if runtime.privacy_outbound else "выкл"))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("privacy:mode:"))
+async def cb_privacy_mode(cq: CallbackQuery, runtime: Runtime) -> None:
+    mode = cq.data.split(":", 2)[2]
+    if mode not in _PRIVACY_MODES:
+        await cq.answer("Неизвестный режим", show_alert=True)
+        return
+    runtime.privacy_mode = mode
+    await cq.message.edit_text(
+        "Приватность кадров в Telegram\n\n"
+        "Выбери, что скрывать. Меньше блоков - сильнее пикселизация.",
+        reply_markup=_privacy_keyboard(runtime),
+    )
+    await cq.answer("Режим: " + _PRIVACY_LABELS[mode])
+
+
+@router.callback_query(F.data == "privacy:blocks")
+async def cb_privacy_blocks(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    await state.set_state(NumberForm.value)
+    await state.update_data(field="privacy_blocks", lo=2, hi=64)
+    await cq.message.answer(
+        f"Сейчас {runtime.privacy_blocks} блоков. Введи число 2..64: "
+        "2 - очень сильная пикселизация, 64 - слабее."
+    )
+    await cq.answer()
 
 
 @router.callback_query(F.data == "panel:mode")
@@ -1237,6 +1305,18 @@ async def cb_event_who(cq: CallbackQuery, storage: Storage) -> None:
     await cq.answer()
 
 
+@router.callback_query(F.data.startswith("event:note:"))
+async def cb_event_note(cq: CallbackQuery, state: FSMContext) -> None:
+    event_id = int(cq.data.split(":")[2])
+    await state.set_state(TextForm.value)
+    await state.update_data(kind="event_note", event_id=event_id)
+    await cq.message.answer(
+        "Заметка к событию: кто пришёл, цель визита или что произошло. "
+        "До 500 символов, «отмена» - выйти."
+    )
+    await cq.answer()
+
+
 @router.callback_query(F.data.startswith("event:set:"))
 async def cb_event_set(cq: CallbackQuery, storage: Storage,
                        crypto: Crypto | None, recognizer: Recognizer | None,
@@ -1424,12 +1504,35 @@ async def cb_voice_voice_set(cq: CallbackQuery, runtime: Runtime,
     if idx >= len(voices):
         await cq.answer("Голос не найден", show_alert=True)
         return
+    if str(getattr(runtime, field)) == voices[idx][0]:
+        await cq.answer("Этот голос уже выбран", show_alert=True)
+        return
     setattr(runtime, field, voices[idx][0])
     await cq.message.edit_text(
         f"Профиль «{title}»: {voices[idx][1]}",
         reply_markup=_voices_keyboard(runtime, voices, slot),
     )
     await cq.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("voice:prev:"))
+async def cb_voice_preview(cq: CallbackQuery,
+                           voice: VoiceEngine | None = None) -> None:
+    if voice is None:
+        await cq.answer("Голосовой движок не создан", show_alert=True)
+        return
+    parts = cq.data.split(":")
+    if len(parts) != 4 or parts[2] not in _VOICE_SLOTS:
+        await cq.answer("Неизвестный профиль голоса", show_alert=True)
+        return
+    slot, idx = parts[2], int(parts[3])
+    voices = await asyncio.to_thread(voice.list_voices)
+    if idx < 0 or idx >= len(voices):
+        await cq.answer("Голос не найден", show_alert=True)
+        return
+    voice_id = voices[idx][0]
+    await asyncio.to_thread(voice.preview_voice, voice_id)
+    await cq.answer("Пример голоса воспроизводится")
 
 
 @router.callback_query(F.data == "voice:say")
@@ -1447,8 +1550,10 @@ async def cb_voice_test(cq: CallbackQuery, voice: VoiceEngine | None = None) -> 
     if voice is None:
         await cq.answer("Голосовой движок не создан", show_alert=True)
         return
-    voice.test_alarm()
-    await cq.answer("Тест: сирена и фраза")
+    if voice.test_alarm():
+        await cq.answer("Тест отправлен в динамик")
+    else:
+        await cq.answer("Аудиовыход не найден: проверь устройство и статус", show_alert=True)
 
 
 @router.callback_query(F.data == "voice:trigger")
@@ -1911,6 +2016,22 @@ async def proc_text(
         await state.clear()
         await message.answer(msg)
         return
+    if kind == "event_note":
+        event_id = int(data["event_id"])
+        if len(text) > 500:
+            await message.answer("Не более 500 символов.")
+            return
+        if crypto is None:
+            await message.answer("Заметка недоступна: ключ шифрования не задан.")
+            return
+        if storage.get_event(event_id) is None:
+            await state.clear()
+            await message.answer("Событие не найдено.")
+            return
+        storage.update_event_note(event_id, crypto.encrypt(text.encode("utf-8")) if text else None)
+        await state.clear()
+        await message.answer("Заметка сохранена." if text else "Заметка удалена.")
+        return
     if kind == "say":
         if voice is None:
             await state.clear()
@@ -2245,6 +2366,13 @@ async def send_notifications(
                             InlineKeyboardButton(
                                 text="Это кто?",
                                 callback_data=f"event:who:{event_id}",
+                            )
+                        ])
+                    if isinstance(event_id, int):
+                        rows.append([
+                            InlineKeyboardButton(
+                                text="Добавить заметку",
+                                callback_data=f"event:note:{event_id}",
                             )
                         ])
                     if payload.get("show_dismiss"):

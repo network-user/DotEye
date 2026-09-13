@@ -119,3 +119,16 @@ def test_runtime_rejects_unbounded_numeric_overrides(tmp_path: Path) -> None:
     assert rt.events_max == 500
     assert rt.events_ttl_days == 14
     st.close()
+
+
+def test_runtime_privacy_modes_keep_legacy_default(tmp_path: Path) -> None:
+    st = Storage(tmp_path / "privacy.db")
+    rt = Runtime(Settings(privacy_outbound=True), st)
+    assert rt.privacy_mode == "silhouette"
+    rt.privacy_mode = "face"
+    rt.privacy_blocks = 6
+    assert rt.privacy_mode == "face"
+    assert rt.privacy_blocks == 6
+    rt.privacy_mode = "off"
+    assert rt.privacy_outbound is False
+    st.close()

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS events (
     boxes TEXT,              -- JSON боксов
     camera_source TEXT,
     zone TEXT,
+    note BLOB,               -- AES-GCM заметка администратора к событию
     FOREIGN KEY (person_id) REFERENCES people (id)
 );
 
@@ -84,6 +85,7 @@ _EVENT_COLUMNS = {
     "boxes": "TEXT",
     "camera_source": "TEXT",
     "zone": "TEXT",
+    "note": "BLOB",
 }
 
 
@@ -334,6 +336,15 @@ class Storage:
             self._conn.execute(
                 "UPDATE events SET person_id = ? WHERE id = ?",
                 (person_id, event_id),
+            )
+            self._conn.commit()
+
+    def update_event_note(self, event_id: int, encrypted_note: bytes | None) -> None:
+        """Сохранить зашифрованную заметку администратора к событию."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE events SET note = ? WHERE id = ?",
+                (encrypted_note, event_id),
             )
             self._conn.commit()
 

@@ -220,6 +220,36 @@ class Runtime:
         self._storage.set("privacy_outbound", "1" if value else "0")
 
     @property
+    def privacy_mode(self) -> str:
+        """Как подготавливать кадры для Telegram.
+
+        Старый флаг privacy_outbound остаётся совместимым: при его включении
+        без явного режима применяется самый безопасный вариант silhouette.
+        """
+        value = self._get_str("privacy_mode", self._settings.privacy_mode).lower()
+        if value in {"off", "person", "face", "silhouette", "all"}:
+            return value
+        return "silhouette" if self.privacy_outbound else "off"
+
+    @privacy_mode.setter
+    def privacy_mode(self, value: str) -> None:
+        if value not in {"off", "person", "face", "silhouette", "all"}:
+            raise ConfigurationError("privacy_mode: off, person, face, silhouette или all")
+        self._storage.set("privacy_mode", value)
+        self.privacy_outbound = value != "off"
+
+    @property
+    def privacy_blocks(self) -> int:
+        value = self._get_int("privacy_blocks", self._settings.privacy_blocks)
+        return value if 2 <= value <= 64 else 12
+
+    @privacy_blocks.setter
+    def privacy_blocks(self, value: int) -> None:
+        if not 2 <= value <= 64:
+            raise ConfigurationError("privacy_blocks: значение должно быть в диапазоне 2..64")
+        self._storage.set("privacy_blocks", str(value))
+
+    @property
     def remote_processing(self) -> bool:
         enabled = self._get_bool("remote_processing", self._settings.remote_processing)
         return enabled and bool(self.remote_url)

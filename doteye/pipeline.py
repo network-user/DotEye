@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 
-from doteye.annotate import annotate, crop_box, encode_jpeg, redact_frame
+from doteye.annotate import annotate, crop_box, encode_jpeg, privacy_frame
 from doteye.camera import CameraSource, build_cameras, parse_sources
 from doteye.crypto import Crypto
 from doteye.detector import Detector, MotionGate, build_detector
@@ -285,9 +285,11 @@ class Pipeline:
         if track.person_name:
             who = track.person_name
         else:
-            cx = (track.box[0] + track.box[2]) // 8
-            cy = (track.box[1] + track.box[3]) // 8
-            who = f"u{cx}_{cy}"
+            # Координаты меняются от шага к шагу и превращали одного гостя в
+            # десятки «новых» неизвестных. Для нераспознанного человека
+            # источник - граница инцидента; трекер хранит его внутри кадра,
+            # а кулдаун защищает от нового сообщения после краткого сбоя.
+            who = "unknown"
         return f"{source}:{who}:{event_type}"
 
     def _emit(
@@ -306,9 +308,9 @@ class Pipeline:
         color = (40, 200, 80) if track.person_name else (40, 40, 220)
         if event_type == "exit":
             color = (160, 160, 160)
-        vis = redact_frame(frame, [track.box]) if self._runtime.privacy_outbound else annotate(
-            frame, [(track.box, label, color)]
-        )
+        vis = privacy_frame(
+            frame, [track.box], self._runtime.privacy_mode, self._runtime.privacy_blocks,
+        ) if self._runtime.privacy_mode != "off" else annotate(frame, [(track.box, label, color)])
         jpeg = encode_jpeg(vis, self._runtime.jpeg_quality)
         original = encode_jpeg(frame, self._runtime.jpeg_quality)
         if jpeg is None or original is None:
@@ -328,7 +330,7 @@ class Pipeline:
             event_type=event_type, boxes=boxes_json,
             camera_source=source, zone=track.zone,
         )
-        if self._runtime.privacy_outbound:
+        if self._runtime.privacy_mode != "off":
             caption = "DotEye: обнаружен человек"
         else:
             caption = f"DotEye: {verb} {who}{conf}\nкамера {source}{zone}"
@@ -500,8 +502,11 @@ class Pipeline:
                 items = list(preview[1]) if preview is not None else []
         if frame is None:
             return None
-        if self._runtime.privacy_outbound:
-            vis = redact_frame(frame, [box for box, _label, _color in items])
+        if self._runtime.privacy_mode != "off":
+            vis = privacy_frame(
+                frame, [box for box, _label, _color in items],
+                self._runtime.privacy_mode, self._runtime.privacy_blocks,
+            )
         else:
             vis = annotate(frame, items) if items else frame
         return encode_jpeg(vis, self._runtime.jpeg_quality)

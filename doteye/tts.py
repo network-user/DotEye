@@ -42,6 +42,51 @@ class TTS(ABC):
         ...
 
 
+# Маркеры, по которым голос считается русским. Проверяются в id, имени и
+# списке языков голоса. Реальные id Windows (SAPI5/SAPI) часто содержат
+# "MSSpeech", "TTS_MS_...RU..." или имена "Ирина", "Pavel", "Elena".
+RUSSIAN_VOICE_MARKERS = (
+    "ru-ru",
+    "russian",
+    "россия",
+    "русск",
+    "ирина",
+    "irina",
+    "pavel",
+    "павел",
+    "elena",
+    "елена",
+    "zira",
+    "katya",
+    "катя",
+    "ms-ru",
+    "ru-",
+    "_ru",
+)
+
+
+def is_russian_voice(voice: object) -> bool:
+    """Определить русский голос по id, имени и списку языков."""
+    blob = " ".join(
+        str(getattr(voice, attr, "") or "") for attr in ("id", "name")
+    ).casefold()
+    langs = getattr(voice, "languages", None) or []
+    for lang in langs:
+        if isinstance(lang, (bytes, bytearray)):
+            try:
+                lang = lang.decode("utf-8", "ignore")
+            except Exception:
+                lang = ""
+        blob += " " + str(lang).casefold()
+    return any(marker in blob for marker in RUSSIAN_VOICE_MARKERS)
+
+
+def _voice_title(voice: object) -> str:
+    vid = str(getattr(voice, "id", "") or "")
+    name = str(getattr(voice, "name", "") or "")
+    return name or vid
+
+
 class DummyTTS(TTS):
     def __init__(self) -> None:
         self.texts: list[str] = []
@@ -105,10 +150,7 @@ class Pyttsx3TTS(TTS):
         except Exception:
             return
         for voice in voices:
-            blob = f"{getattr(voice, 'id', '')} {getattr(voice, 'name', '')}".lower()
-            langs = getattr(voice, "languages", None) or []
-            blob += " " + " ".join(str(x) for x in langs).lower()
-            if any(mark in blob for mark in ("ru-ru", "russian", "irina", "pavel")):
+            if is_russian_voice(voice):
                 self._engine.setProperty("voice", voice.id)
                 return
 
@@ -122,10 +164,11 @@ class Pyttsx3TTS(TTS):
         except Exception:
             return []
         for voice in voices:
+            if not is_russian_voice(voice):
+                continue
             vid = str(getattr(voice, "id", "") or "")
-            title = str(getattr(voice, "name", "") or vid)
             if vid:
-                out.append((vid, title))
+                out.append((vid, _voice_title(voice)))
         return out
 
     def synthesize(
@@ -174,7 +217,7 @@ class EspeakTTS(TTS):
         self.ensure()
         if not self._bin:
             return []
-        return [("ru", "espeak ru"), ("en", "espeak en")]
+        return [("ru", "espeak ru")]
 
     def synthesize(
         self, text: str, rate: float = 1.0, voice_id: str = ""

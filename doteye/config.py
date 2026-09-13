@@ -196,9 +196,15 @@ class Settings:
     privacy_outbound: bool = field(
         default_factory=lambda: _env_bool("DOTEYE_PRIVACY_OUTBOUND", "1")
     )
+    privacy_mode: str = field(
+        default_factory=lambda: os.getenv("DOTEYE_PRIVACY_MODE", "")
+    )
+    privacy_blocks: int = field(
+        default_factory=lambda: _env_int("DOTEYE_PRIVACY_BLOCKS", 12)
+    )
     events_limit: int = field(default_factory=lambda: _env_int("DOTEYE_EVENTS_LIMIT", 10))
     imgsz: int = field(default_factory=lambda: _env_int("DOTEYE_IMGSZ", 640))
-    track_max_misses: int = field(default_factory=lambda: _env_int("DOTEYE_TRACK_MAX_MISSES", 3))
+    track_max_misses: int = field(default_factory=lambda: _env_int("DOTEYE_TRACK_MAX_MISSES", 8))
 
     # Охрана и тихие часы (локальное время, формат HH:MM-HH:MM)
     armed: bool = field(default_factory=lambda: _env_bool("DOTEYE_ARMED", "1"))

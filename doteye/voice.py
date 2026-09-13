@@ -48,6 +48,8 @@ PHRASE_TITLES: dict[str, str] = {
 
 CLEAR_ON_VALUES = ("both", "known", "exit")
 
+VOICE_PREVIEW_PHRASE = "Съешь же ещё этих мягких французских булок, да выпей чаю."
+
 
 @dataclass(frozen=True)
 class VoiceTrack:
@@ -84,6 +86,8 @@ class VoiceJob:
     siren: bool = False
     interrupt: bool = False
     voice_slot: str = "default"
+    voice_id: str = ""
+    force: bool = False
     future: Future[list[tuple[str, str]]] | None = None
 
 
@@ -178,6 +182,15 @@ class VoiceEngine:
         except Exception:
             return []
 
+    def preview_voice(self, voice_id: str) -> None:
+        """Озвучить пример голоса через динамики, вне очереди авто-фраз."""
+        if not voice_id:
+            return
+        self._enqueue(VoiceJob(
+            kind="manual", text=VOICE_PREVIEW_PHRASE,
+            interrupt=True, voice_id=voice_id, force=True,
+        ))
+
     def announce(self, text: str) -> bool:
         """Ручная озвучка из чата. Работает даже при выключенных авто-фразах."""
         cleaned = " ".join((text or "").split())[:500]
@@ -186,11 +199,13 @@ class VoiceEngine:
         self._enqueue(VoiceJob(kind="manual", text=cleaned, interrupt=True))
         return True
 
-    def test_alarm(self) -> None:
+    def test_alarm(self) -> bool:
+        """Поставить тест сирены в очередь и сообщить, есть ли аудиовыход."""
         phrase = self._phrase("stranger")
         self._enqueue(VoiceJob(
             kind="test", text=phrase, siren=True, interrupt=True, voice_slot="alarm",
         ))
+        return self._player.available()
 
     def trigger_alarm(self, text: str | None = None) -> bool:
         phrase = (text or "").strip() or self._phrase("stranger")
@@ -510,10 +525,11 @@ class VoiceEngine:
     def _play_job(self, job: VoiceJob) -> None:
         volume = max(0.0, min(1.0, self._runtime.voice_volume))
         rate = max(0.4, min(2.5, self._runtime.voice_rate))
-        voice_id = self._voice_id(job.voice_slot)
+        voice_id = job.voice_id or self._voice_id(job.voice_slot)
         want_siren = job.siren and self._can_siren()
+        preview = job.kind == "manual" and job.force
         want_speech = bool(job.text) and (
-            job.kind == "manual" or self._runtime.voice_speech_enabled
+            preview or job.kind == "manual" or self._runtime.voice_speech_enabled
         )
         if volume <= 0.001:
             return

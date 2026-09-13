@@ -49,6 +49,19 @@ def annotate(
     return vis
 
 
+def pixelate(frame: np.ndarray, blocks: int) -> np.ndarray:
+    """Пикселизировать весь переданный фрагмент без изменения его размера."""
+    if frame.size == 0:
+        return frame.copy()
+    if blocks < 2:
+        raise ValueError("blocks должен быть не меньше 2")
+    height, width = frame.shape[:2]
+    miniature = cv2.resize(
+        frame, (min(blocks, width), min(blocks, height)), interpolation=cv2.INTER_AREA,
+    )
+    return cv2.resize(miniature, (width, height), interpolation=cv2.INTER_NEAREST)
+
+
 def redact_frame(frame: np.ndarray, boxes: list[Box], blocks: int = 12) -> np.ndarray:
     """Скрыть окружение и грубо пикселизировать обнаруженные объекты.
 
@@ -69,14 +82,52 @@ def redact_frame(frame: np.ndarray, boxes: list[Box], blocks: int = 12) -> np.nd
         y1, y2 = sorted((max(0, min(height, y1)), max(0, min(height, y2))))
         if x2 <= x1 or y2 <= y1:
             continue
-        crop = frame[y1:y2, x1:x2]
-        small_width = min(blocks, crop.shape[1])
-        small_height = min(blocks, crop.shape[0])
-        miniature = cv2.resize(crop, (small_width, small_height), interpolation=cv2.INTER_AREA)
-        result[y1:y2, x1:x2] = cv2.resize(
-            miniature, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST,
-        )
+        result[y1:y2, x1:x2] = pixelate(frame[y1:y2, x1:x2], blocks)
     return result
+
+
+def privacy_frame(frame: np.ndarray, boxes: list[Box], mode: str, blocks: int) -> np.ndarray:
+    """Подготовить кадр для отправки без ложного обещания защиты лица.
+
+    Режим face использует каскад OpenCV внутри силуэта человека. Если лицо не
+    найдено, пикселизируется весь силуэт - это безопаснее отправки лица.
+    """
+    if mode == "off":
+        return frame.copy()
+    if mode == "all":
+        return pixelate(frame, blocks)
+    if mode == "silhouette":
+        return redact_frame(frame, boxes, blocks)
+    result = frame.copy()
+    if mode == "person":
+        for box in boxes:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            h, w = result.shape[:2]
+            x1, x2 = sorted((max(0, min(w, x1)), max(0, min(w, x2))))
+            y1, y2 = sorted((max(0, min(h, y1)), max(0, min(h, y2))))
+            if x2 > x1 and y2 > y1:
+                result[y1:y2, x1:x2] = pixelate(result[y1:y2, x1:x2], blocks)
+        return result
+    if mode == "face":
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        for box in boxes:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            h, w = result.shape[:2]
+            x1, x2 = sorted((max(0, min(w, x1)), max(0, min(w, x2))))
+            y1, y2 = sorted((max(0, min(h, y1)), max(0, min(h, y2))))
+            crop = result[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            faces = cascade.detectMultiScale(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), 1.1, 4)
+            if len(faces) == 0:
+                result[y1:y2, x1:x2] = pixelate(crop, blocks)
+                continue
+            for fx, fy, fw, fh in faces:
+                result[y1 + fy:y1 + fy + fh, x1 + fx:x1 + fx + fw] = pixelate(
+                    crop[fy:fy + fh, fx:fx + fw], blocks
+                )
+        return result
+    return redact_frame(frame, boxes, blocks)
 
 
 def encode_jpeg(frame: np.ndarray, quality: int) -> bytes | None:
