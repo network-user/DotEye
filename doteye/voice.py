@@ -145,6 +145,11 @@ class VoiceEngine:
     def audio_available(self) -> bool:
         return self._player.available()
 
+    @property
+    def speech_available(self) -> bool:
+        """Есть ли настоящий синтезатор, а не тихая тестовая заглушка."""
+        return self._tts.available()
+
     def status_line(self) -> str:
         alarm = "ТРЕВОГА" if self._alarming else "idle"
         tts = "tts" if self._tts.available() else "нет tts"
@@ -186,14 +191,15 @@ class VoiceEngine:
         except Exception:
             return []
 
-    def preview_voice(self, voice_id: str) -> None:
+    def preview_voice(self, voice_id: str) -> bool:
         """Озвучить пример голоса через динамики, вне очереди авто-фраз."""
-        if not voice_id:
-            return
+        if not voice_id or not self._player.available() or not self._tts.available():
+            return False
         self._enqueue(VoiceJob(
             kind="manual", text=VOICE_PREVIEW_PHRASE,
             interrupt=True, voice_id=voice_id, force=True,
         ))
+        return True
 
     def announce(self, text: str) -> bool:
         """Ручная озвучка из чата. Работает даже при выключенных авто-фразах."""

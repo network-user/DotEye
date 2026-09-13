@@ -300,8 +300,6 @@ class Pipeline:
         source: str,
         now: float,
     ) -> DetectionEvent | None:
-        who = track.person_name or "неизвестный"
-        verb = "вошёл" if event_type == "enter" else "вышел"
         conf = f" ({track.confidence:.2f})" if track.confidence else ""
         zone = f", зона {track.zone}" if track.zone else ""
         label = f"{track.person_name or '?'}{conf}".strip()
@@ -330,10 +328,15 @@ class Pipeline:
             event_type=event_type, boxes=boxes_json,
             camera_source=source, zone=track.zone,
         )
-        if self._runtime.privacy_mode != "off":
-            caption = "DotEye: обнаружен человек"
+        if event_type == "enter" and track.person_name:
+            caption = f"DotEye: Обнаружен: {track.person_name}{conf}"
+        elif event_type == "enter":
+            caption = "DotEye: Обнаружен незнакомый человек"
+        elif track.person_name:
+            caption = f"DotEye: Вышел: {track.person_name}{conf}"
         else:
-            caption = f"DotEye: {verb} {who}{conf}\nкамера {source}{zone}"
+            caption = "DotEye: Незнакомый человек вышел"
+        caption += f"\nкамера {source}{zone}"
         return DetectionEvent(
             track.person_name, track.confidence, jpeg, now,
             event_id=event_id, event_type=event_type,

@@ -25,7 +25,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
     TelegramObject,
 )
 
@@ -50,7 +52,7 @@ HELP = (
     "/detector - auto | yolo | yunet | motion\n"
     "/model - выбрать YOLO-модель\n"
     "/device - cpu | cuda | mps\n"
-    "/mode - presence <-> identity\n"
+    "/mode - переключить: «Обнаружение людей» / «Распознавание лиц»\n"
     "/confidence - порог детекции (0..1)\n"
     "/cooldown - пауза повторного входа, сек\n\n"
     "Люди\n"
@@ -136,6 +138,19 @@ def _back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Назад", callback_data="panel:open")]
     ])
+
+
+def _main_menu() -> ReplyKeyboardMarkup:
+    """Постоянная навигация Telegram для частых действий."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Панель"), KeyboardButton(text="Статус")],
+            [KeyboardButton(text="События"), KeyboardButton(text="Люди")],
+            [KeyboardButton(text="Голос и тревога"), KeyboardButton(text="Превью")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие",
+    )
 
 
 def _camera_title(source: str) -> str:
@@ -294,6 +309,22 @@ def _on(flag: bool) -> str:
     return "вкл" if flag else "выкл"
 
 
+_MODE_LABELS = {
+    "presence": "Обнаружение людей",
+    "identity": "Распознавание лиц",
+}
+_MODE_HINTS = {
+    "presence": "замечает любого человека, но не определяет, кто это",
+    "identity": "сравнивает лицо с вашим списком людей",
+}
+
+
+def _mode_text(mode: str) -> str:
+    label = _MODE_LABELS.get(mode, mode)
+    hint = _MODE_HINTS.get(mode, "")
+    return f"{label} ({mode}) - {hint}" if hint else label
+
+
 def _ico(flag: bool) -> str:
     """Эмодзи-индикатор вкл/выкл для быстрого считывания."""
     return "🟢" if flag else "⚪"
@@ -321,7 +352,7 @@ def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> Inlin
                 callback_data="panel:arm",
             ),
             InlineKeyboardButton(
-                text=f"Режим: {runtime.detect_mode} → {mode_next}",
+                text=f"Режим: {_MODE_LABELS[runtime.detect_mode]}",
                 callback_data="panel:mode",
             ),
         ],
@@ -698,7 +729,8 @@ def _phrase_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=f"{title}: {preview}",
                 callback_data=f"voice:ph:{key}",
-            )
+            ),
+            InlineKeyboardButton(text="▶", callback_data=f"voice:phrase_preview:{key}"),
         ])
     rows.append([InlineKeyboardButton(text="Назад", callback_data="voice:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -765,7 +797,7 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
         "",
         "Детекция",
         f"{running_s} Пайплайн: {'работает' if running else 'остановлен'}",
-        f"Режим: {runtime.detect_mode}",
+        f"Режим: {_mode_text(runtime.detect_mode)}",
         f"Камера: {runtime.camera_source}",
         f"Детектор: {runtime.detector_backend} (device={runtime.device})",
         f"Модель: {model_title}",
@@ -881,9 +913,7 @@ async def _send_events_page(
         reply_markup=_events_nav(page, total),
     )
     for row in rows:
-        who = row["person_name"] or "неизвестный"
         kind = row["event_type"] or "enter"
-        verb = "вошёл" if kind == "enter" else ("вышел" if kind == "exit" else kind)
         conf = f", conf={row['confidence']:.2f}" if row["confidence"] else ""
         cam = f"\nкамера {row['camera_source']}" if row["camera_source"] else ""
         zone = f", зона {row['zone']}" if row["zone"] else ""
@@ -894,10 +924,15 @@ async def _send_events_page(
                 note = f"\nзаметка: {note_text}"
             except Exception:
                 note = "\nзаметка: недоступна"
-        if runtime.privacy_mode != "off":
-            caption = f"{row['detected_at']}\nобнаружен человек"
+        if kind == "enter" and row["person_name"]:
+            summary = f"Обнаружен: {row['person_name']}"
+        elif kind == "enter":
+            summary = "Обнаружен незнакомый человек"
+        elif row["person_name"]:
+            summary = f"Вышел: {row['person_name']}"
         else:
-            caption = f"{row['detected_at']}\n{verb} {who}{conf}{cam}{zone}"
+            summary = "Незнакомый человек вышел"
+        caption = f"{row['detected_at']}\n{summary}{conf}{cam}{zone}"
         caption += note
         markup = _event_keyboard(int(row["id"]), row["person_name"] is None and kind == "enter", storage)
         if not row["frame"]:
@@ -951,16 +986,18 @@ async def cmd_start(message: Message, settings: Settings) -> None:
     admin = "админ" if _is_admin(message, settings) else "гость"
     await message.answer(
         f"DotEye на связи ({admin}).\n\n"
-        "Управление - /panel\n"
+        "Основные действия - в нижнем меню, подробные - в панели.\n"
         "Подключи камеру через /camera, выбери режим.\n\n"
         "/help - все команды\n"
-        "/cancel - отменить ввод"
+        "/cancel - отменить ввод",
+        reply_markup=_main_menu(),
     )
 
 
 @router.message(Command("panel"))
 async def cmd_panel(message: Message, runtime: Runtime,
                     voice: VoiceEngine | None = None) -> None:
+    await message.answer("Постоянное меню включено.", reply_markup=_main_menu())
     await message.answer(
         "Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime, voice)
     )
@@ -987,6 +1024,48 @@ async def cmd_status(message: Message, runtime: Runtime,
                      recognizer: Recognizer | None, pipeline: Pipeline | None,
                      voice: VoiceEngine | None = None) -> None:
     await message.answer(_status_text(runtime, recognizer, pipeline, voice))
+
+
+@router.message(F.text == "Панель")
+async def menu_panel(message: Message, runtime: Runtime,
+                     voice: VoiceEngine | None = None) -> None:
+    await message.answer("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime, voice))
+
+
+@router.message(F.text == "Статус")
+async def menu_status(message: Message, runtime: Runtime,
+                      recognizer: Recognizer | None, pipeline: Pipeline | None,
+                      voice: VoiceEngine | None = None) -> None:
+    await message.answer(_status_text(runtime, recognizer, pipeline, voice))
+
+
+@router.message(F.text == "События")
+async def menu_events(message: Message, storage: Storage, crypto: Crypto | None,
+                      runtime: Runtime) -> None:
+    await _send_events_page(message, storage, crypto, runtime, 0)
+
+
+@router.message(F.text == "Люди")
+async def menu_people(message: Message, storage: Storage) -> None:
+    await message.answer("Люди:", reply_markup=_people_keyboard(storage, 0))
+
+
+@router.message(F.text == "Голос и тревога")
+async def menu_voice(message: Message, runtime: Runtime,
+                     voice: VoiceEngine | None = None) -> None:
+    await message.answer(_voice_text(runtime, voice), reply_markup=_voice_keyboard(runtime, voice))
+
+
+@router.message(F.text == "Превью")
+async def menu_snapshot(message: Message, pipeline: Pipeline | None) -> None:
+    if pipeline is None:
+        await message.answer("Пайплайн выключен.")
+        return
+    jpeg = await asyncio.to_thread(pipeline.snapshot)
+    if jpeg is None:
+        await message.answer("Кадр пока недоступен.")
+        return
+    await message.answer_photo(BufferedInputFile(jpeg, filename="snapshot.jpg"))
 
 
 @router.callback_query(F.data == "panel:open")
@@ -1091,7 +1170,7 @@ async def cb_mode(
 ) -> None:
     runtime.detect_mode = "identity" if runtime.detect_mode == "presence" else "presence"
     await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
-    await cq.answer(f"Режим: {runtime.detect_mode}")
+    await cq.answer("Режим: " + _mode_text(runtime.detect_mode), show_alert=True)
 
 
 @router.callback_query(F.data == "panel:detector")
@@ -1534,8 +1613,24 @@ async def cb_voice_preview(cq: CallbackQuery,
         await cq.answer("Голос не найден", show_alert=True)
         return
     voice_id = voices[idx][0]
-    await asyncio.to_thread(voice.preview_voice, voice_id)
-    await cq.answer("Пример голоса воспроизводится")
+    if await asyncio.to_thread(voice.preview_voice, voice_id):
+        await cq.answer("Пример голоса воспроизводится")
+    else:
+        await cq.answer("Нет синтезатора речи или аудиовыхода - открой «Статус»", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("voice:phrase_preview:"))
+async def cb_voice_phrase_preview(cq: CallbackQuery, runtime: Runtime,
+                                  voice: VoiceEngine | None = None) -> None:
+    key = cq.data.split(":", 2)[2]
+    if key not in DEFAULT_PHRASES or voice is None:
+        await cq.answer("Пример недоступен", show_alert=True)
+        return
+    text = runtime.voice_phrase(key).replace("{name}", "гость")
+    if voice.speech_available and voice.audio_available and voice.announce(text):
+        await cq.answer("Фраза воспроизводится")
+    else:
+        await cq.answer("Нет синтезатора речи или аудиовыхода - открой «Статус»", show_alert=True)
 
 
 @router.callback_query(F.data == "voice:say")
@@ -1579,9 +1674,12 @@ async def cb_voice_dismiss(cq: CallbackQuery, runtime: Runtime,
     notice = voice.dismiss("manual")
     if cq.message:
         try:
-            await _edit_voice_panel(cq, runtime, voice)
+            await cq.message.delete()
+            await cq.message.answer(
+                "Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime, voice),
+            )
         except Exception:
-            pass
+            await _edit_voice_panel(cq, runtime, voice)
     await cq.answer("Тревога снята" if notice else "Тревоги не было")
 
 
@@ -2040,8 +2138,17 @@ async def proc_text(
             await state.clear()
             await message.answer("Голосовой движок не создан.")
             return
+        if not voice.speech_available or not voice.audio_available:
+            await message.answer(
+                "Озвучка недоступна: нет синтезатора речи или аудиовыхода. "
+                "Открой «Статус» в панели и проверь строку «Голос»."
+            )
+            return
         if not voice.announce(text):
-            await message.answer("Пустой текст.")
+            await message.answer(
+                "Озвучка недоступна: нет синтезатора речи или аудиовыхода. "
+                "Открой «Статус» в панели и проверь строку «Голос»."
+            )
             return
         await state.clear()
         await message.answer(f"Озвучиваю: {text}")

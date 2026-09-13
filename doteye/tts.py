@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -189,7 +190,16 @@ class Pyttsx3TTS(TTS):
             try:
                 self._engine.save_to_file(text, path)
                 self._engine.runAndWait()
-                data = Path(path).read_bytes()
+                # SAPI иногда завершает runAndWait до того, как дописывает
+                # WAV. Короткое ожидание не позволяет передать в winsound
+                # пустой файл и превратить «озвучиваю» в тишину.
+                data = b""
+                until = time.monotonic() + 2.0
+                while time.monotonic() < until:
+                    data = Path(path).read_bytes()
+                    if is_wav(data) and len(data) > 44:
+                        break
+                    time.sleep(0.05)
             finally:
                 Path(path).unlink(missing_ok=True)
             return data if is_wav(data) else None
