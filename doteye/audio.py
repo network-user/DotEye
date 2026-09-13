@@ -70,6 +70,39 @@ def scale_wav_volume(data: bytes, volume: float) -> bytes:
     return out.getvalue()
 
 
+def fade_out_wav(data: bytes, seconds: float = 0.4) -> bytes:
+    """Плавно затушить хвост WAV, чтобы останов звука не был резким."""
+    seconds = max(0.0, float(seconds))
+    if not is_wav(data) or seconds <= 0.0:
+        return data
+    src = io.BytesIO(data)
+    try:
+        with wave.open(src, "rb") as wf:
+            params = wf.getparams()
+            raw = wf.readframes(wf.getnframes())
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+    except wave.Error:
+        return data
+    if sampwidth != 2:
+        return data
+    pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    n = pcm.size
+    fade = int(framerate * seconds)
+    if fade <= 0 or n == 0:
+        return data
+    fade = min(fade, n)
+    env = np.ones(n, dtype=np.float32)
+    env[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setnchannels(params.nchannels)
+        wf.setsampwidth(2)
+        wf.setframerate(framerate)
+        wf.writeframes((pcm * env).astype(np.int16).tobytes())
+    return out.getvalue()
+
+
 def generate_siren(
     duration: float = 2.2,
     sample_rate: int = SAMPLE_RATE,

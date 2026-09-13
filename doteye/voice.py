@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from doteye.audio import (
     Player,
     build_player,
+    fade_out_wav,
     generate_siren,
     mix_wav,
     scale_wav_volume,
@@ -488,6 +489,7 @@ class VoiceEngine:
             self._siren_condition.notify_all()
 
     def _stop_siren(self) -> None:
+        """Остановить петлю сирены с плавным затуханием вместо резкого обрыва."""
         with self._siren_condition:
             self._siren_active = False
             self._siren_clip = None
@@ -496,6 +498,10 @@ class VoiceEngine:
             self._player.stop()
         except Exception:
             pass
+        # Короткий хвост затухания поверх, чтобы переключение на «тревога
+        # снята» не звучало обрывом. Идёт через воркер перед фразой снятия.
+        if self._can_siren():
+            self._enqueue(VoiceJob(kind="fade"))
 
     def _set_siren_clip(self, clip: bytes | None) -> None:
         with self._siren_condition:
@@ -611,6 +617,15 @@ class VoiceEngine:
             if wav:
                 self._build_alarm_clip(wav, volume)
                 print(f"[voice] alarm: {job.text[:80]}")
+            return
+
+        # Плавное затухание сирены при снятии тревоги.
+        if job.kind == "fade":
+            if volume <= 0.001:
+                return
+            tail = generate_siren(duration=0.7, volume=0.4, fade_edges=False)
+            wav = fade_out_wav(scale_wav_volume(tail, volume), seconds=0.5)
+            self._player.play_wav(wav)
             return
 
         want_siren = job.siren and self._can_siren()

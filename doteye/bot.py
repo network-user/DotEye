@@ -81,6 +81,7 @@ TEST_SNAPSHOT_TTL_SECONDS = 60
 
 class CameraForm(StatesGroup):
     source = State()
+    name = State()
 
 
 class AddPersonForm(StatesGroup):
@@ -182,9 +183,10 @@ def _camera_source_text(source: str) -> str:
 
 def _camera_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for index, source in enumerate(runtime.camera_source.split("|"), start=0):
+    for index, source in enumerate(runtime.camera_sources(), start=0):
+        label = runtime.camera_label(index, source)
         rows.append([InlineKeyboardButton(
-            text=f"Камера {index + 1}: {_camera_title(source)}",
+            text=f"Камера {index + 1}: {label}",
             callback_data=f"camera:view:{index}",
         )])
     rows.extend([
@@ -195,7 +197,9 @@ def _camera_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _camera_info_text(source: str, index: int, pipeline: Pipeline | None) -> str:
+def _camera_info_text(
+    source: str, index: int, pipeline: Pipeline | None, runtime: Runtime,
+) -> str:
     info = pipeline.camera_info(source) if pipeline is not None else None
     if pipeline is None:
         status = "проверка недоступна: пайплайн выключен"
@@ -213,7 +217,7 @@ def _camera_info_text(source: str, index: int, pipeline: Pipeline | None) -> str
         reconnects = int(info["reconnects"])
         error = info["last_error"]
     lines = [
-        f"Камера {index + 1}",
+        f"Камера {index + 1}: {runtime.camera_label(index, source)}",
         f"Тип: {_camera_title(source)}",
         f"Источник: {_camera_source_text(source)}",
         f"Статус: {status}",
@@ -223,15 +227,72 @@ def _camera_info_text(source: str, index: int, pipeline: Pipeline | None) -> str
         lines.append(f"Переподключений: {reconnects}")
     if error:
         lines.append(f"Ошибка: {error}")
+    if not runtime.camera_enabled(index):
+        lines.append("Состояние: выключена")
+    cooldown = runtime.camera_cooldown(index)
+    lines.append(f"Кулдаун: {cooldown:g} сек")
+    lines.append(
+        "Уведомления: вход "
+        + ("вкл" if runtime.camera_notify_enter(index) else "выкл")
+        + ", выход " + ("вкл" if runtime.camera_notify_exit(index) else "выкл")
+    )
+    quiet = runtime.camera_quiet(index)
+    if quiet:
+        lines.append("Сейчас тихие часы: уведомления приостановлены")
+    mode = runtime.camera_detect_mode(index)
+    lines.append(f"Режим: {'распознавание лиц' if mode == 'identity' else 'обнаружение людей'}")
     return "\n".join(lines)
 
 
 def _camera_detail_keyboard(index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Тестовый снимок", callback_data=f"camera:test:{index}")],
+        [InlineKeyboardButton(text="Настройки камеры", callback_data=f"camera:conf:{index}")],
+        [InlineKeyboardButton(text="Переименовать", callback_data=f"camera:rename:{index}")],
         [InlineKeyboardButton(text="Изменить список", callback_data="camera:edit")],
         [InlineKeyboardButton(text="Если не работает", callback_data="camera:help")],
         [InlineKeyboardButton(text="◀ К списку камер", callback_data="panel:camera")],
+    ])
+
+
+def _camera_conf_text(index: int, source: str, runtime: Runtime) -> str:
+    enabled = runtime.camera_enabled(index)
+    return (
+        f"Камера {index + 1}: {runtime.camera_label(index, source)}\n\n"
+        f"Обработка: {'включена' if enabled else 'выключена'}\n"
+        f"Кулдаун: {runtime.camera_cooldown(index):g} сек\n"
+        f"Уведомлять о входе: {'да' if runtime.camera_notify_enter(index) else 'нет'}\n"
+        f"Уведомлять о выходе: {'да' if runtime.camera_notify_exit(index) else 'нет'}\n"
+        f"Свои тихие часы: {runtime.camera_override(index).get('quiet_hours') or 'общие'}\n"
+        f"Режим: {runtime.camera_detect_mode(index)}"
+    )
+
+
+def _camera_conf_keyboard(index: int, runtime: Runtime) -> InlineKeyboardMarkup:
+    enabled = runtime.camera_enabled(index)
+    notify_enter = runtime.camera_notify_enter(index)
+    notify_exit = runtime.camera_notify_exit(index)
+    mode = runtime.camera_detect_mode(index)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"Обработка: {'вкл' if enabled else 'выкл'}",
+            callback_data=f"camera:tog:{index}:enabled",
+        )],
+        [InlineKeyboardButton(text="Кулдаун", callback_data=f"camera:num:{index}:cooldown")],
+        [InlineKeyboardButton(
+            text=f"Вход: {'вкл' if notify_enter else 'выкл'}",
+            callback_data=f"camera:tog:{index}:notify_enter",
+        )],
+        [InlineKeyboardButton(
+            text=f"Выход: {'вкл' if notify_exit else 'выкл'}",
+            callback_data=f"camera:tog:{index}:notify_exit",
+        )],
+        [InlineKeyboardButton(
+            text=f"Режим: {mode}",
+            callback_data=f"camera:mode:{index}",
+        )],
+        [InlineKeyboardButton(text="Сбросить настройки", callback_data=f"camera:reset:{index}")],
+        [InlineKeyboardButton(text="◀ К камере", callback_data=f"camera:view:{index}")],
     ])
 
 
@@ -411,6 +472,16 @@ def _tune_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=f"Кулдаун {runtime.cooldown_seconds:g}с",
                 callback_data="panel:cooldown",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"NMS IoU {runtime.nms_iou:g}",
+                callback_data="panel:nms_iou",
+            ),
+            InlineKeyboardButton(
+                text=f"Мин. площадь {runtime.person_min_area:g}",
+                callback_data="panel:person_min_area",
             ),
         ],
         [
@@ -617,7 +688,8 @@ def _voice_text(runtime: Runtime, voice: VoiceEngine | None) -> str:
         f"тревога {_on(runtime.voice_alarm_enabled)}, "
         f"сирена {_on(runtime.voice_siren_enabled)}, "
         f"речь {_on(runtime.voice_speech_enabled)}\n"
-        f"Снятие: {_CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on)}"
+        f"Снятие: {_CLEAR_ON_LABELS.get(runtime.voice_clear_on, runtime.voice_clear_on)}\n"
+        f"Не спамить по «своему»: {_on(runtime.mute_known_present)}"
         f"{last}{err}"
     )
 
@@ -674,6 +746,12 @@ def _voice_keyboard(runtime: Runtime, voice: VoiceEngine | None) -> InlineKeyboa
             InlineKeyboardButton(
                 text=f"Глушить в тихие: {_on(runtime.voice_mute_quiet)}",
                 callback_data="voice:tog:voice_mute_quiet",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Не спамить по «своему»: {_on(runtime.mute_known_present)}",
+                callback_data="voice:tog:mute_known_present",
             ),
         ],
         [InlineKeyboardButton(
@@ -1448,6 +1526,7 @@ _VOICE_TOGGLES = {
     "voice_armed_announce",
     "voice_alarm_on_presence",
     "voice_mute_quiet",
+    "mute_known_present",
 }
 
 _VOICE_NUM_FIELDS = {
@@ -1699,13 +1778,124 @@ async def cb_camera_view(cq: CallbackQuery, runtime: Runtime,
                          pipeline: Pipeline | None) -> None:
     try:
         index = int(cq.data.split(":")[2])
-        source = runtime.camera_source.split("|")[index]
+        source = runtime.camera_sources()[index]
     except (IndexError, ValueError):
         await cq.answer("Камера уже изменилась. Обновите список.", show_alert=True)
         return
     await cq.message.edit_text(
-        _camera_info_text(source, index, pipeline),
+        _camera_info_text(source, index, pipeline, runtime),
         reply_markup=_camera_detail_keyboard(index),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("camera:conf:"))
+async def cb_camera_conf(cq: CallbackQuery, runtime: Runtime) -> None:
+    try:
+        index = int(cq.data.split(":")[2])
+        source = runtime.camera_sources()[index]
+    except (IndexError, ValueError):
+        await cq.answer("Камера уже изменилась. Обновите список.", show_alert=True)
+        return
+    await cq.message.edit_text(
+        _camera_conf_text(index, source, runtime),
+        reply_markup=_camera_conf_keyboard(index, runtime),
+    )
+    await cq.answer()
+
+
+async def _refresh_camera_conf(cq: CallbackQuery, runtime: Runtime, index: int) -> None:
+    source = runtime.camera_sources()[index]
+    try:
+        await cq.message.edit_text(
+            _camera_conf_text(index, source, runtime),
+            reply_markup=_camera_conf_keyboard(index, runtime),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("camera:tog:"))
+async def cb_camera_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
+    try:
+        _, _, raw_index, key = cq.data.split(":")
+        index = int(raw_index)
+        current = runtime.camera_override(index).get(key)
+        if key == "notify_enter":
+            new_value = not runtime.camera_notify_enter(index)
+        elif key == "notify_exit":
+            new_value = not runtime.camera_notify_exit(index)
+        else:
+            new_value = not runtime.camera_enabled(index)
+        runtime.set_camera_override(index, key, new_value)
+    except (IndexError, ValueError, ConfigurationError) as exc:
+        await cq.answer(str(exc) or "Не удалось изменить", show_alert=True)
+        return
+    del current
+    await _refresh_camera_conf(cq, runtime, index)
+    await cq.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("camera:mode:"))
+async def cb_camera_mode(cq: CallbackQuery, runtime: Runtime) -> None:
+    try:
+        index = int(cq.data.split(":")[2])
+        mode = runtime.camera_detect_mode(index)
+        runtime.set_camera_override(
+            index, "detect_mode", "presence" if mode == "identity" else "identity",
+        )
+    except (IndexError, ValueError, ConfigurationError) as exc:
+        await cq.answer(str(exc) or "Не удалось изменить", show_alert=True)
+        return
+    await _refresh_camera_conf(cq, runtime, index)
+    await cq.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("camera:reset:"))
+async def cb_camera_reset(cq: CallbackQuery, runtime: Runtime) -> None:
+    try:
+        index = int(cq.data.split(":")[2])
+    except (IndexError, ValueError):
+        await cq.answer("Камера уже изменилась", show_alert=True)
+        return
+    for key in ("cooldown_seconds", "notify_enter", "notify_exit", "enabled", "quiet_hours", "detect_mode"):
+        runtime.clear_camera_override(index, key)
+    await _refresh_camera_conf(cq, runtime, index)
+    await cq.answer("Настройки сброшены")
+
+
+@router.callback_query(F.data.startswith("camera:num:"))
+async def cb_camera_num(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    try:
+        _, _, raw_index, key = cq.data.split(":")
+        index = int(raw_index)
+        runtime.camera_sources()[index]
+    except (IndexError, ValueError):
+        await cq.answer("Камера уже изменилась", show_alert=True)
+        return
+    await state.set_state(NumberForm.value)
+    await state.update_data(
+        field="camera_cooldown", camera_index=index, camera_key=key, lo=0.0, hi=86400.0,
+    )
+    await cq.message.answer(
+        f"Камера {index + 1}: введите кулдаун в секундах (0..86400). «отмена» - выйти."
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("camera:rename:"))
+async def cb_camera_rename(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    try:
+        index = int(cq.data.split(":")[2])
+        runtime.camera_sources()[index]
+    except (IndexError, ValueError):
+        await cq.answer("Камера уже изменилась", show_alert=True)
+        return
+    await state.set_state(CameraForm.name)
+    await state.update_data(camera_index=index)
+    await cq.message.answer(
+        f"Камера {index + 1}: введите имя (до 40 символов). "
+        "Пустое сообщение или «-» сбросит имя. «отмена» - выйти."
     )
     await cq.answer()
 
@@ -1718,7 +1908,7 @@ async def cb_camera_test(cq: CallbackQuery, runtime: Runtime,
         return
     try:
         index = int(cq.data.split(":")[2])
-        source = runtime.camera_source.split("|")[index]
+        source = runtime.camera_sources()[index]
     except (IndexError, ValueError):
         await cq.answer("Камера уже изменилась. Обновите список.", show_alert=True)
         return
@@ -1846,6 +2036,28 @@ async def cb_face(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> Non
     await state.set_state(NumberForm.value)
     await state.update_data(field="face_threshold", lo=0.05, hi=1.0)
     await cq.message.answer(f"Порог лица сейчас {runtime.face_threshold}. Меньше - строже:")
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:nms_iou")
+async def cb_nms_iou(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    await state.set_state(NumberForm.value)
+    await state.update_data(field="nms_iou", lo=0.0, hi=1.0)
+    await cq.message.answer(
+        f"NMS IoU сейчас {runtime.nms_iou:g}. Это порог объединения "
+        "перекрывающихся боксов (меньше = строже, 0..1):"
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "panel:person_min_area")
+async def cb_person_min_area(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    await state.set_state(NumberForm.value)
+    await state.update_data(field="person_min_area", lo=0.0, hi=0.5)
+    await cq.message.answer(
+        f"Минимальная площадь человека сейчас {runtime.person_min_area:g} "
+        "(доля кадра, 0..0.5). Мелкие «квадратики» меньше этой площади отбрасываются:"
+    )
     await cq.answer()
 
 
@@ -1982,6 +2194,28 @@ async def proc_camera_source(message: Message, state: FSMContext, runtime: Runti
     )
 
 
+@router.message(CameraForm.name)
+async def proc_camera_name(message: Message, state: FSMContext, runtime: Runtime) -> None:
+    if _cancel_requested(message):
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+    data = await state.get_data()
+    index = int(data.get("camera_index", -1))
+    raw = (message.text or "").strip()
+    try:
+        runtime.set_camera_name(index, "" if raw in ("-", "сброс") else raw)
+    except ConfigurationError as exc:
+        await message.answer(f"Имя отклонено: {exc}")
+        return
+    await state.clear()
+    label = runtime.camera_label(index)
+    await message.answer(
+        f"Имя сохранено: камера {index + 1} - {label}",
+        reply_markup=_camera_keyboard(runtime),
+    )
+
+
 @router.message(Command("confidence"))
 async def cmd_confidence(message: Message, state: FSMContext, runtime: Runtime) -> None:
     await state.set_state(NumberForm.confidence)
@@ -2045,6 +2279,14 @@ async def proc_number(message: Message, state: FSMContext, runtime: Runtime) -> 
     if field == "voice_volume_pct":
         runtime.voice_volume = value / 100.0
         shown = f"voice_volume = {runtime.voice_volume:g}"
+    elif field == "camera_cooldown":
+        index = int(data.get("camera_index", -1))
+        key = str(data.get("camera_key", "cooldown_seconds"))
+        runtime.set_camera_override(index, key, value)
+        shown = f"камера {index + 1}: кулдаун = {value:g} сек"
+        await state.clear()
+        await message.answer(shown, reply_markup=_camera_conf_keyboard(index, runtime))
+        return
     else:
         setattr(runtime, field, value)
         shown = f"{field} = {value}"

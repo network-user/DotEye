@@ -1,9 +1,11 @@
 # DotEye - runtime зависимости
+# Верхние границы держат проверенные major-версии (ABI/API), нижние - не ниже
+# веток без известных advisory. Обновлять осознанно, перепроверяя тесты.
 aiogram>=3.4
 python-dotenv>=1.0
-opencv-python>=4.8
-numpy>=1.24
-cryptography>=42.0
+opencv-python>=4.8,<5.0
+numpy>=1.24,<2.0
+cryptography>=43.0,<51
 
 # Детекция (вариант A, точнее всего): YOLO
 ultralytics>=8.1

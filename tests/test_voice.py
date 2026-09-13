@@ -52,8 +52,10 @@ def test_unknown_enter_raises_alarm(tmp_path: Path) -> None:
     assert engine.alarming
     assert notices and notices[0].event_type == "alarm"
     engine.drain()
-    assert any("незнакомец" in text.casefold() for text in tts.texts)
-    assert player.plays  # сирена + речь
+    assert any("посторонний" in text.casefold() for text in tts.texts)
+    # Непрерывная сирена собирается в зацикленный клип, а не в разовые play.
+    assert engine._siren_active
+    assert engine._siren_clip
 
 
 def test_known_face_clears_alarm(tmp_path: Path) -> None:
@@ -121,7 +123,7 @@ def test_quiet_mutes_welcome_but_not_alarm(tmp_path: Path) -> None:
     ))
     assert engine.alarming
     engine.drain()
-    assert any("незнакомец" in text.casefold() for text in tts.texts)
+    assert any("посторонний" in text.casefold() for text in tts.texts)
 
 
 def test_exit_does_not_clear_alarm(tmp_path: Path) -> None:
@@ -226,3 +228,33 @@ def test_phrase_override(tmp_path: Path) -> None:
 def test_build_tts_is_lazy() -> None:
     tts = build_tts()
     assert tts.name
+
+
+def test_alarm_builds_mixed_clip(tmp_path: Path) -> None:
+    """Клип тревоги смешивает сирену и речь в один WAV потока."""
+    engine, _tts, player, _rt = _engine(tmp_path)
+    from doteye.audio import is_wav
+
+    speech = b""
+    import io as _io, wave  # noqa: E402
+
+    buf = _io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(22050)
+        wf.writeframes(b"\x00\x00" * 6000)
+    speech = buf.getvalue()
+    engine._build_alarm_clip(speech, 0.8)
+    clip = engine._siren_clip
+    assert clip is not None and is_wav(clip)
+
+
+def test_stop_siren_enqueues_fade(tmp_path: Path) -> None:
+    engine, _tts, player, runtime = _engine(tmp_path)
+    engine._activate_siren()
+    engine._stop_siren()
+    assert engine._siren_active is False
+    # Fade-джоб попал в очередь.
+    jobs = list(engine._queue.queue)
+    assert any(job.kind == "fade" for job in jobs)

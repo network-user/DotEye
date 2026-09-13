@@ -86,12 +86,16 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_ALLOW_OPEN_ACCESS` | `1` = пустой список админов пускает всех, только при `DOTEYE_ENV=development` |
 | `DOTEYE_ALLOWED_URL_HOSTS` | точный CSV allowlist хостов сетевых камер и remote |
 | `DOTEYE_DETECT_MODE` | `presence` \| `identity` |
-| `DOTEYE_CAMERA_SOURCE` | `0` = вебка, rtsp/http; несколько через `\|` |
+| `DOTEYE_CAMERA_SOURCE` | `0` = вебка, rtsp/http; несколько через `\|` (до 4) |
+| `DOTEYE_CAMERA_NAMES` | имена камер по порядку источников, CSV |
+| `DOTEYE_CAMERA_PARALLEL` | `1` = параллельная обработка камер (свой детектор на камеру) |
 | `DOTEYE_DETECTOR` | `auto` \| `yolo` \| `yunet` \| `motion` |
 | `DOTEYE_MODEL_PATH` | путь к YOLO-модели |
 | `DOTEYE_FACE_MODEL` | путь к ONNX-модели YuNet (для детектора yunet) |
 | `DOTEYE_DEVICE` | `cpu` \| `cuda` \| `mps` |
 | `DOTEYE_MIN_CONFIDENCE` | порог детекции 0..1 |
+| `DOTEYE_NMS_IOU` | порог NMS объединения перекрывающихся боксов 0..1 |
+| `DOTEYE_PERSON_MIN_AREA` | минимальная площадь человека (доля кадра 0..0.5), мельче - отброс |
 | `DOTEYE_COOLDOWN_SECONDS` | пауза повторного входа, сек |
 | `DOTEYE_JPEG_QUALITY` | качество JPEG для кадров событий |
 | `DOTEYE_PRIVACY_OUTBOUND` | `1` = в Telegram отправляются только пикселизированные люди на скрытом фоне |
@@ -100,6 +104,7 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_ARMED` | `1` = охрана включена |
 | `DOTEYE_QUIET_HOURS` | тихие часы `HH:MM-HH:MM` |
 | `DOTEYE_NOTIFY_EXIT` | `1` = уведомлять о выходе |
+| `DOTEYE_MUTE_KNOWN_PRESENT` | `1` = не спамить по узнанному человеку, пока он в кадре |
 | `DOTEYE_IMGSZ` | размер входа YOLO, по умолчанию 640 |
 | `DOTEYE_EVENTS_MAX` | лимит строк событий в БД, по умолчанию 200 |
 | `DOTEYE_EVENTS_TTL_DAYS` | TTL событий, дни, по умолчанию 7 |

@@ -353,7 +353,7 @@ def test_identity_unknown_raises_voice_alarm(tmp_path: Path) -> None:
     assert voice.alarming
     assert any(event.event_type == "alarm" for event in events)
     voice.drain()
-    assert any("незнакомец" in text.casefold() for text in tts.texts)
+    assert any("посторонний" in text.casefold() for text in tts.texts)
 
 
 def test_late_identify_clears_voice_alarm(tmp_path: Path) -> None:
@@ -378,3 +378,92 @@ def test_late_identify_clears_voice_alarm(tmp_path: Path) -> None:
     events = pipe.step()
     assert voice.alarming is False
     assert any(event.event_type == "alarm_cleared" for event in events)
+
+
+class MultiCameraPipeline(Pipeline):
+    pass
+
+
+def _multi_build(tmp_path: Path, cameras, **over: object) -> Pipeline:
+    settings = make_settings(**over)
+    storage = Storage(tmp_path / "multi.db")
+    runtime = Runtime(settings, storage)
+    crypto = Crypto(generate_key_b64())
+    pipe = Pipeline(cameras, FakeDetector(), None, storage, crypto, runtime)  # type: ignore[arg-type]
+    pipe.use_motion_gate = False
+    return pipe
+
+
+def test_multi_camera_events_are_tagged_per_camera(tmp_path: Path) -> None:
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = _multi_build(tmp_path, cams, cooldown_seconds=0.0, camera_parallel=False)
+    events = pipe.step()
+    sources = {event.camera_source for event in events}
+    assert sources == {"0", "1"}
+    assert len(pipe._trackers) == 2
+
+
+def test_camera_custom_name_used_in_event(tmp_path: Path) -> None:
+    from doteye.config import Settings
+
+    settings = Settings(camera_source="0|1", camera_parallel=False)
+    storage = Storage(tmp_path / "named.db")
+    runtime = Runtime(settings, storage)
+    runtime.set_camera_name(0, "Вход")
+    crypto = Crypto(generate_key_b64())
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = Pipeline(cams, FakeDetector(), None, storage, crypto, runtime)  # type: ignore[arg-type]
+    pipe.use_motion_gate = False
+    events = pipe.step()
+    labels = {event.camera_source for event in events}
+    assert "Вход" in labels
+
+
+def test_camera_override_cooldown_blocks_second_enter(tmp_path: Path) -> None:
+    from doteye.config import Settings
+
+    settings = Settings(camera_source="0|1", camera_parallel=False)
+    storage = Storage(tmp_path / "ov.db")
+    runtime = Runtime(settings, storage)
+    runtime.set_camera_override(0, "cooldown_seconds", 999.0)
+    crypto = Crypto(generate_key_b64())
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = Pipeline(cams, FakeDetector(), None, storage, crypto, runtime)  # type: ignore[arg-type]
+    pipe.use_motion_gate = False
+    first = pipe.step()
+    assert {event.camera_source for event in first} == {"0", "1"}
+    second = pipe.step()
+    assert second == []
+
+
+def test_camera_disabled_skips_processing(tmp_path: Path) -> None:
+    from doteye.config import Settings
+
+    settings = Settings(camera_source="0|1", camera_parallel=False)
+    storage = Storage(tmp_path / "dis.db")
+    runtime = Runtime(settings, storage)
+    runtime.set_camera_override(0, "enabled", False)
+    crypto = Crypto(generate_key_b64())
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = Pipeline(cams, FakeDetector(), None, storage, crypto, runtime)  # type: ignore[arg-type]
+    pipe.use_motion_gate = False
+    events = pipe.step()
+    assert {event.camera_source for event in events} == {"1"}
+
+
+def test_parallel_detection_uses_worker_detectors(tmp_path: Path, monkeypatch) -> None:
+    built: list[str] = []
+
+    def fake_build(*args, **kwargs):
+        built.append("new")
+        return FakeDetector()
+
+    monkeypatch.setattr("doteye.pipeline.build_detector", fake_build)
+    cams = [("0", FakeCamera()), ("1", FakeCamera())]
+    pipe = _multi_build(tmp_path, cams, cooldown_seconds=0.0, camera_parallel=True)
+    assert pipe._parallel_enabled() is True
+    pipe.step()
+    assert len(pipe._parallel) == 2
+    # Второй шаг переиспользует воркеров, не создаёт новые.
+    pipe.step()
+    assert built.count("new") == 2

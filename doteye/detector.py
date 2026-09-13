@@ -33,16 +33,18 @@ CLASS_PERSON = 0
 def _merge_person_boxes(
     boxes: list[tuple[int, int, int, int]],
     shape: tuple[int, ...],
+    min_area_fraction: float = 0.004,
+    merge_iou: float = 0.5,
 ) -> list[tuple[int, int, int, int]]:
     """Убрать осколки и объединить близкие боксы одного человека.
 
     YOLO без жёсткого NMS выдаёт кучу мелких квадратов по частям тела. Здесь
-    отсеиваются мизерные области (менее 0.4% кадра) и склеиваются сильно
-    перекрывающиеся соседи, чтобы в кадре остался один цельный прямоугольник
-    на человека.
+    отсеиваются мизерные области (менее min_area_fraction кадра) и склеиваются
+    сильно перекрывающиеся соседи, чтобы в кадре остался один цельный
+    прямоугольник на человека.
     """
     height, width = int(shape[0]), int(shape[1])
-    min_area = width * height * 0.004
+    min_area = width * height * max(0.0, min_area_fraction)
     filtered: list[tuple[int, int, int, int]] = []
     for box in boxes:
         x1, y1, x2, y2 = box
@@ -64,7 +66,7 @@ def _merge_person_boxes(
         for j in range(i + 1, len(filtered)):
             if j in consumed:
                 continue
-            if iou(box, filtered[j]) >= 0.5:
+            if iou(box, filtered[j]) >= merge_iou:
                 group.append(filtered[j])
                 consumed.add(j)
         x1 = min(b[0] for b in group)
@@ -93,13 +95,23 @@ class Detector(ABC):
 class LocalDetector(Detector):
     """YOLO в текущем процессе (CPU/GPU)."""
 
-    def __init__(self, model_path: str, device: str, min_conf: float, imgsz: int = 640) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        device: str,
+        min_conf: float,
+        imgsz: int = 640,
+        nms_iou: float = 0.6,
+        person_min_area: float = 0.004,
+    ) -> None:
         from ultralytics import YOLO
 
         self._model = YOLO(model_path)
         self._device = device
         self._min_conf = min_conf
         self._imgsz = int(imgsz)
+        self._nms_iou = max(0.0, min(1.0, float(nms_iou)))
+        self._person_min_area = max(0.0, min(0.5, float(person_min_area)))
 
     @property
     def backend(self) -> str:
@@ -113,7 +125,7 @@ class LocalDetector(Detector):
             "verbose": False,
             "device": self._device,
             "imgsz": self._imgsz,
-            "iou": 0.6,
+            "iou": self._nms_iou,
             "max_det": 20,
         }
         if self._device == "cuda":
@@ -124,7 +136,9 @@ class LocalDetector(Detector):
             for b in r.boxes.xyxy.cpu().numpy():
                 boxes.append(tuple(int(v) for v in b))
         self.last_error = None
-        return _merge_person_boxes(boxes, frame.shape[:2])
+        return _merge_person_boxes(
+            boxes, frame.shape[:2], self._person_min_area, self._nms_iou,
+        )
 
     def close(self) -> None:
         del self._model
@@ -294,12 +308,16 @@ def yolo_available() -> bool:
 
 
 def _build_local(kind: str, model_path: str, device: str, min_conf: float,
-                 face_model: str, imgsz: int) -> Detector:
+                 face_model: str, imgsz: int, nms_iou: float = 0.6,
+                 person_min_area: float = 0.004) -> Detector:
     kind = (kind or "auto").lower()
 
     if kind in ("auto", "yolo") and yolo_available():
         try:
-            return LocalDetector(model_path, device, min_conf, imgsz=imgsz)
+            return LocalDetector(
+                model_path, device, min_conf, imgsz=imgsz,
+                nms_iou=nms_iou, person_min_area=person_min_area,
+            )
         except Exception as exc:
             print(f"[detector] YOLO не загрузился ({exc})")
     elif kind == "yolo":
@@ -322,7 +340,9 @@ def build_detector(kind: str, model_path: str, device: str, min_conf: float,
                    remote: bool, remote_url: str, face_model: str = "",
                    crypto: "Crypto | None" = None, imgsz: int = 640,
                    remote_fallback: bool = False,
-                   remote_insecure: bool = False) -> Detector:
+                   remote_insecure: bool = False,
+                   nms_iou: float = 0.6,
+                   person_min_area: float = 0.004) -> Detector:
     """Собрать детектор. kind: auto | yolo | yunet | motion.
 
     remote перекрывает локальный бэкенд. auto идёт по цепочке yolo -> yunet -> motion.
@@ -330,7 +350,10 @@ def build_detector(kind: str, model_path: str, device: str, min_conf: float,
     if remote:
         fallback: Detector | None = None
         if remote_fallback:
-            fallback = _build_local(kind, model_path, device, min_conf, face_model, imgsz)
+            fallback = _build_local(
+                kind, model_path, device, min_conf, face_model, imgsz,
+                nms_iou, person_min_area,
+            )
         if not remote_url:
             print("[detector] remote включён, URL пуст")
             if fallback is not None:
@@ -339,4 +362,5 @@ def build_detector(kind: str, model_path: str, device: str, min_conf: float,
             remote_url, crypto, fallback=fallback, insecure=remote_insecure,
         )
 
-    return _build_local(kind, model_path, device, min_conf, face_model, imgsz)
+    return _build_local(kind, model_path, device, min_conf, face_model, imgsz,
+                        nms_iou, person_min_area)

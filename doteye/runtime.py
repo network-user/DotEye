@@ -9,16 +9,27 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from doteye.config import (
     ConfigurationError,
     Settings,
+    validate_camera_name,
     validate_camera_source,
     validate_quiet_hours,
     validate_remote_url,
 )
 from doteye.storage import Storage
+
+_CAMERA_OVERRIDE_KEYS = {
+    "cooldown_seconds": "float",
+    "notify_enter": "bool",
+    "notify_exit": "bool",
+    "enabled": "bool",
+    "quiet_hours": "quiet",
+    "detect_mode": "mode",
+}
 
 
 def in_quiet_hours(spec: str, now: datetime | None = None) -> bool:
@@ -45,6 +56,45 @@ def in_quiet_hours(spec: str, now: datetime | None = None) -> bool:
     if start < end:
         return start <= minutes < end
     return minutes >= start or minutes < end
+
+
+def _normalize_camera_override(key: str, value: object) -> object | None:
+    """Привести значение per-camera override к безопасному типу.
+
+    None означает «сбросить override, вернуться к глобальному значению».
+    """
+    kind = _CAMERA_OVERRIDE_KEYS.get(key)
+    if kind is None:
+        raise ConfigurationError(f"камера: неизвестная настройка {key}")
+    if value is None:
+        return None
+    if kind == "float":
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"камера.{key}: нужно число") from exc
+        if not 0 <= number <= 86400:
+            raise ConfigurationError(f"камера.{key}: значение должно быть 0..86400")
+        return number
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on", "вкл", "да"):
+            return True
+        if text in ("0", "false", "no", "off", "выкл", "нет"):
+            return False
+        raise ConfigurationError(f"камера.{key}: ожидается да/нет")
+    if kind == "quiet":
+        return validate_quiet_hours(str(value))
+    if kind == "mode":
+        text = str(value).strip().lower()
+        if text not in {"presence", "identity"}:
+            raise ConfigurationError(f"камера.{key}: presence или identity")
+        return text
+    raise ConfigurationError(f"камера.{key}: неизвестный тип настройки")
 
 
 class Runtime:
@@ -108,6 +158,133 @@ class Runtime:
             environment=self._settings.environment,
         ))
 
+    def camera_sources(self) -> list[str]:
+        return [part.strip() for part in self.camera_source.split("|") if part.strip()]
+
+    @property
+    def camera_parallel(self) -> bool:
+        return self._settings.camera_parallel
+
+    @property
+    def camera_names(self) -> list[str]:
+        """Имена камер по порядку источников. Хранятся CSV в settings."""
+        count = len(self.camera_sources())
+        raw = self._get_str("camera_names", "")
+        names = [part.strip() for part in raw.split(",")] if raw else []
+        default = list(self._settings.camera_names)
+        names.extend([""] * (count - len(names)))
+        defaults = list(default) + [""] * max(0, count - len(default))
+        out: list[str] = []
+        for index in range(count):
+            candidate = names[index] if index < len(names) else ""
+            source = candidate or (defaults[index] if index < len(defaults) else "")
+            try:
+                out.append(validate_camera_name(source))
+            except ConfigurationError:
+                out.append("")
+        return out
+
+    def camera_name(self, index: int) -> str:
+        names = self.camera_names
+        return names[index] if 0 <= index < len(names) else ""
+
+    @camera_names.setter
+    def camera_names(self, value: list[str] | tuple[str, ...]) -> None:
+        count = len(self.camera_sources())
+        cleaned = [validate_camera_name(item) for item in list(value)[:count]]
+        cleaned.extend([""] * (count - len(cleaned)))
+        self._storage.set("camera_names", ",".join(cleaned))
+
+    def set_camera_name(self, index: int, name: str) -> None:
+        names = list(self.camera_names)
+        if not 0 <= index < len(names):
+            raise ConfigurationError("камера с таким номером не найдена")
+        names[index] = validate_camera_name(name)
+        self.camera_names = names
+
+    def _camera_overrides(self) -> dict[str, dict[str, object]]:
+        raw = self._get_str("camera_overrides", "")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, dict[str, object]] = {}
+        for key, value in parsed.items():
+            if isinstance(value, dict):
+                out[str(key)] = dict(value)
+        return out
+
+    def camera_override(self, index: int) -> dict[str, object]:
+        return dict(self._camera_overrides().get(str(index), {}))
+
+    def set_camera_override(self, index: int, key: str, value: object) -> None:
+        if key not in _CAMERA_OVERRIDE_KEYS:
+            raise ConfigurationError(f"камера: неизвестная настройка {key}")
+        rounded = _normalize_camera_override(key, value)
+        data = self._camera_overrides()
+        entry = data.setdefault(str(index), {})
+        if rounded is None:
+            entry.pop(key, None)
+        else:
+            entry[key] = rounded
+        if not entry:
+            data.pop(str(index), None)
+        self._storage.set("camera_overrides", json.dumps(data, ensure_ascii=False))
+
+    def clear_camera_override(self, index: int, key: str) -> None:
+        data = self._camera_overrides()
+        entry = data.get(str(index))
+        if not entry:
+            return
+        entry.pop(key, None)
+        if not entry:
+            data.pop(str(index), None)
+        self._storage.set("camera_overrides", json.dumps(data, ensure_ascii=False))
+
+    def camera_cooldown(self, index: int) -> float:
+        value = self.camera_override(index).get("cooldown_seconds")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return self.cooldown_seconds
+
+    def camera_notify_enter(self, index: int) -> bool:
+        value = self.camera_override(index).get("notify_enter")
+        return bool(value) if isinstance(value, bool) else self.should_notify()
+
+    def camera_notify_exit(self, index: int) -> bool:
+        value = self.camera_override(index).get("notify_exit")
+        if isinstance(value, bool):
+            return value
+        return self.notify_exit
+
+    def camera_enabled(self, index: int) -> bool:
+        value = self.camera_override(index).get("enabled")
+        return bool(value) if isinstance(value, bool) else True
+
+    def camera_quiet(self, index: int, now: datetime | None = None) -> bool:
+        value = self.camera_override(index).get("quiet_hours")
+        spec = (str(value).strip() if value else "") or self.quiet_hours
+        return in_quiet_hours(spec, now)
+
+    def camera_detect_mode(self, index: int) -> str:
+        value = self.camera_override(index).get("detect_mode")
+        text = str(value or "")
+        return text if text in {"presence", "identity"} else self.detect_mode
+
+    def camera_label(self, index: int, source: str | None = None) -> str:
+        """Человекочитаемая метка камеры для уведомлений и событий."""
+        name = self.camera_name(index)
+        if name:
+            return name
+        if source is None:
+            sources = self.camera_sources()
+            source = sources[index] if 0 <= index < len(sources) else ""
+        return source or f"камера {index + 1}"
+
     @property
     def detector_backend(self) -> str:
         value = self._get_str("detector_backend", self._settings.detector_backend)
@@ -118,6 +295,28 @@ class Runtime:
         if value not in {"auto", "yolo", "yunet", "motion"}:
             raise ConfigurationError("detector_backend: auto, yolo, yunet или motion")
         self._storage.set("detector_backend", value)
+
+    @property
+    def nms_iou(self) -> float:
+        value = self._get_float("nms_iou", self._settings.nms_iou)
+        return value if 0.0 <= value <= 1.0 else self._settings.nms_iou
+
+    @nms_iou.setter
+    def nms_iou(self, value: float) -> None:
+        if not 0.0 <= value <= 1.0:
+            raise ConfigurationError("nms_iou: значение должно быть в диапазоне 0..1")
+        self._storage.set("nms_iou", str(value))
+
+    @property
+    def person_min_area(self) -> float:
+        value = self._get_float("person_min_area", self._settings.person_min_area)
+        return value if 0.0 <= value <= 0.5 else self._settings.person_min_area
+
+    @person_min_area.setter
+    def person_min_area(self, value: float) -> None:
+        if not 0.0 <= value <= 0.5:
+            raise ConfigurationError("person_min_area: значение должно быть в диапазоне 0..0.5")
+        self._storage.set("person_min_area", str(value))
 
     @property
     def min_confidence(self) -> float:
@@ -209,6 +408,20 @@ class Runtime:
     @notify_exit.setter
     def notify_exit(self, value: bool) -> None:
         self._storage.set("notify_exit", "1" if value else "0")
+
+    @property
+    def mute_known_present(self) -> bool:
+        """Не напоминать о человеке, который уже узнан и остаётся в кадре.
+
+        Вход узнанного фиксируется один раз, а на повторные появления (после
+        краткого сбоя трекинга или на других камерах) событие гасится, пока
+        тот же человек физически не покинет кадр.
+        """
+        return self._get_bool("mute_known_present", self._settings.mute_known_present)
+
+    @mute_known_present.setter
+    def mute_known_present(self, value: bool) -> None:
+        self._storage.set("mute_known_present", "1" if value else "0")
 
     @property
     def privacy_outbound(self) -> bool:

@@ -22,6 +22,11 @@ def _env_bool(name: str, default: str) -> bool:
     return os.getenv(name, default) == "1"
 
 
+def _env_camera_names() -> tuple[str, ...]:
+    raw = os.getenv("DOTEYE_CAMERA_NAMES", "")
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None:
@@ -51,6 +56,7 @@ _CAMERA_SCHEMES = {"rtsp", "rtsps", "http", "https"}
 _REMOTE_SCHEMES = {"https", "http"}
 _MAX_URL_LENGTH = 2048
 _MAX_CAMERA_SOURCES = 4
+_MAX_CAMERA_NAME_LENGTH = 40
 
 
 def parse_allowed_hosts(value: str) -> frozenset[str]:
@@ -133,6 +139,27 @@ def validate_remote_url(value: str, *, allowed_hosts: frozenset[str], environmen
     return validate_url(value, allowed_hosts=allowed_hosts, purpose="remote", environment=environment)
 
 
+def validate_camera_name(value: str) -> str:
+    """Очистить пользовательское имя камеры; пустая строка = имя по умолчанию."""
+    text = " ".join(str(value or "").split())
+    if len(text) > _MAX_CAMERA_NAME_LENGTH:
+        raise ConfigurationError(
+            f"имя камеры длиннее {_MAX_CAMERA_NAME_LENGTH} символов"
+        )
+    if any(ord(char) < 32 for char in text):
+        raise ConfigurationError("имя камеры содержит управляющие символы")
+    return text
+
+
+def validate_camera_names(names: tuple[str, ...], count: int) -> tuple[str, ...]:
+    """Имена камер по порядку источников; недостающие - пустые строки."""
+    cleaned = [validate_camera_name(name) for name in names]
+    if len(cleaned) > count:
+        raise ConfigurationError("DOTEYE_CAMERA_NAMES: имён больше, чем камер")
+    cleaned.extend([""] * (count - len(cleaned)))
+    return tuple(cleaned)
+
+
 def validate_quiet_hours(value: str) -> str:
     text = value.strip()
     if not text or text.casefold() in {"0", "off", "выкл", "-"}:
@@ -171,9 +198,15 @@ class Settings:
 
     # Камеры: один источник или несколько через |
     camera_source: str = field(default_factory=lambda: os.getenv("DOTEYE_CAMERA_SOURCE", "0"))
+    # Человекочитаемые имена по порядку источников (CSV)
+    camera_names: tuple[str, ...] = field(default_factory=_env_camera_names)
+    # Параллельная обработка камер: свой детектор на каждую
+    camera_parallel: bool = field(default_factory=lambda: _env_bool("DOTEYE_CAMERA_PARALLEL", "1"))
 
     # Детектор
     detector_backend: str = field(default_factory=lambda: os.getenv("DOTEYE_DETECTOR", "auto"))
+    nms_iou: float = field(default_factory=lambda: _env_float("DOTEYE_NMS_IOU", 0.6))
+    person_min_area: float = field(default_factory=lambda: _env_float("DOTEYE_PERSON_MIN_AREA", 0.004))
     remote_processing: bool = field(default_factory=lambda: _env_bool("DOTEYE_REMOTE_PROCESSING", "0"))
     remote_url: str = field(default_factory=lambda: os.getenv("DOTEYE_REMOTE_URL", ""))
     remote_fallback: bool = field(default_factory=lambda: _env_bool("DOTEYE_REMOTE_FALLBACK", "1"))
@@ -210,6 +243,9 @@ class Settings:
     armed: bool = field(default_factory=lambda: _env_bool("DOTEYE_ARMED", "1"))
     quiet_hours: str = field(default_factory=lambda: os.getenv("DOTEYE_QUIET_HOURS", ""))
     notify_exit: bool = field(default_factory=lambda: _env_bool("DOTEYE_NOTIFY_EXIT", "1"))
+    mute_known_present: bool = field(
+        default_factory=lambda: _env_bool("DOTEYE_MUTE_KNOWN_PRESENT", "1")
+    )
 
     # Хранение событий
     events_max: int = field(default_factory=lambda: _env_int("DOTEYE_EVENTS_MAX", 200))
@@ -272,6 +308,10 @@ class Settings:
             raise ConfigurationError("DOTEYE_DETECT_MODE: presence или identity")
         if self.detector_backend not in {"auto", "yolo", "yunet", "motion"}:
             raise ConfigurationError("DOTEYE_DETECTOR: auto, yolo, yunet или motion")
+        if not 0.0 <= self.nms_iou <= 1.0:
+            raise ConfigurationError("DOTEYE_NMS_IOU должен быть в диапазоне 0..1")
+        if not 0.0 <= self.person_min_area <= 0.5:
+            raise ConfigurationError("DOTEYE_PERSON_MIN_AREA должен быть в диапазоне 0..0.5")
         if self.device not in {"cpu", "cuda", "mps"}:
             raise ConfigurationError("DOTEYE_DEVICE: cpu, cuda или mps")
         if not 0.0 <= self.min_confidence <= 1.0:
@@ -316,6 +356,10 @@ class Settings:
             raise ConfigurationError("DOTEYE_VOICE_COOLDOWN_SECONDS должен быть в диапазоне 0..86400")
         object.__setattr__(self, "camera_source", validate_camera_source(
             self.camera_source, allowed_hosts=self.allowed_url_hosts, environment=self.environment,
+        ))
+        object.__setattr__(self, "camera_names", validate_camera_names(
+            tuple(getattr(self, "camera_names", ()) or ()),
+            len(self.camera_source.split("|")),
         ))
         object.__setattr__(self, "quiet_hours", validate_quiet_hours(self.quiet_hours))
         if self.remote_url:
