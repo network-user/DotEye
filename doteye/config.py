@@ -223,7 +223,7 @@ class Settings:
     voice_speech_enabled: bool = field(default_factory=lambda: _env_bool("DOTEYE_VOICE_SPEECH", "1"))
     voice_welcome: bool = field(default_factory=lambda: _env_bool("DOTEYE_VOICE_WELCOME", "1"))
     voice_goodbye: bool = field(default_factory=lambda: _env_bool("DOTEYE_VOICE_GOODBYE", "0"))
-    voice_presence: bool = field(default_factory=lambda: _env_bool("DOTEYE_VOICE_PRESENCE", "0"))
+    voice_presence: bool = field(default_factory=lambda: _env_bool("DOTEYE_VOICE_PRESENCE", "1"))
     voice_armed_announce: bool = field(default_factory=lambda: _env_bool("DOTEYE_VOICE_ARMED_ANNOUNCE", "1"))
     voice_alarm_on_presence: bool = field(
         default_factory=lambda: _env_bool("DOTEYE_VOICE_ALARM_ON_PRESENCE", "0")

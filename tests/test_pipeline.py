@@ -120,6 +120,27 @@ def test_event_created(tmp_path: Path) -> None:
     assert event.event_id is not None
 
 
+def test_capture_face_embedding_uses_cached_camera_frame(tmp_path: Path) -> None:
+    recognizer = CountingRecognizer(distance=1.0)
+    pipe = build(tmp_path, recognizer)
+    assert pipe.capture_face_embedding() is None
+    pipe.step()
+    assert pipe.capture_face_embedding() == b"probe"
+    assert recognizer.embed_calls == 1
+
+
+def test_camera_snapshot_and_info_are_bound_to_source(tmp_path: Path) -> None:
+    pipe = build(tmp_path)
+    assert pipe.snapshot("0") is None
+    pipe.step()
+    jpeg = pipe.snapshot("0")
+    assert jpeg is not None and jpeg[:2] == b"\xff\xd8"
+    info = pipe.camera_info("0")
+    assert info is not None
+    assert info["has_frame"] is True
+    assert pipe.camera_info("missing") is None
+
+
 def test_no_event_without_person(tmp_path: Path) -> None:
     pipe = build(tmp_path)
     pipe._detector = FakeDetector(boxes=False)  # type: ignore[assignment]

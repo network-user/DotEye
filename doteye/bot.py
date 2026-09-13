@@ -11,6 +11,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
@@ -40,24 +41,29 @@ from doteye.voice import CLEAR_ON_VALUES, DEFAULT_PHRASES, PHRASE_TITLES, VoiceE
 from doteye.zones import Zone, dump_zones, parse_zones
 
 HELP = (
-    "DotEye - кто зашёл в комнату.\n\n"
+    "👁 DotEye - кто зашёл в комнату.\n\n"
+    "🕹 Управление\n"
     "/panel - админ-панель (кнопки)\n"
-    "/status - текущие настройки\n"
-    "/mode - presence <-> identity\n"
+    "/status - текущие настройки\n\n"
+    "📹 Видео и детекция\n"
     "/camera - источник кадров (несколько через | )\n"
     "/detector - auto | yolo | yunet | motion\n"
-    "/device - cpu | cuda | mps\n"
     "/model - выбрать YOLO-модель\n"
+    "/device - cpu | cuda | mps\n"
+    "/mode - presence <-> identity\n"
     "/confidence - порог детекции (0..1)\n"
-    "/cooldown - пауза повторного входа, сек\n"
+    "/cooldown - пауза повторного входа, сек\n\n"
+    "👥 Люди\n"
     "/people - известные люди\n"
     "/add - добавить человека (имя + фото)\n"
-    "/remove - удалить человека\n"
+    "/remove - удалить человека\n\n"
+    "🔔 События и голос\n"
     "/events - последние события\n"
     "/say - сказать вслух через динамики\n"
-    "/alarm - ручная тревога /alarm off снять\n"
-    "/cancel - отменить текущий ввод\n"
-    "/help - эта справка"
+    "/alarm - ручная тревога (/alarm off - снять)\n\n"
+    "ℹ️ Прочее\n"
+    "/help - эта справка\n"
+    "/cancel - отменить текущий ввод"
 )
 
 DETECTORS = ["auto", "yolo", "yunet", "motion"]
@@ -66,6 +72,7 @@ EVENTS_PAGE = 3
 OUTBOX_POLL_SECONDS = 1.0
 OUTBOX_BATCH_SIZE = 20
 OUTBOX_MAX_RETRY_SECONDS = 3600
+TEST_SNAPSHOT_TTL_SECONDS = 60
 
 
 class CameraForm(StatesGroup):
@@ -129,6 +136,96 @@ def _back_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def _camera_title(source: str) -> str:
+    """Короткое безопасное название источника для кнопок и панели."""
+    if source.isdecimal():
+        return f"Локальная камера #{source}"
+    parsed = urlsplit(source)
+    host = parsed.hostname or "сетевой источник"
+    scheme = parsed.scheme.upper() or "URL"
+    return f"{scheme}: {host}"
+
+
+def _camera_source_text(source: str) -> str:
+    """Источник без учётных данных и query-параметров."""
+    if source.isdecimal():
+        return f"устройство #{source}"
+    parsed = urlsplit(source)
+    if not parsed.scheme:
+        return source
+    host = parsed.hostname or ""
+    try:
+        port_value = parsed.port
+    except ValueError:
+        port_value = None
+    port = f":{port_value}" if port_value else ""
+    path = parsed.path or "/"
+    return f"{parsed.scheme}://{host}{port}{path}"
+
+
+def _camera_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, source in enumerate(runtime.camera_source.split("|"), start=0):
+        rows.append([InlineKeyboardButton(
+            text=f"📷 Камера {index + 1}: {_camera_title(source)}",
+            callback_data=f"camera:view:{index}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton(text="➕ Изменить список камер", callback_data="camera:edit")],
+        [InlineKeyboardButton(text="❓ Инструкция и помощь", callback_data="camera:help")],
+        [InlineKeyboardButton(text="◀ Назад", callback_data="panel:open")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _camera_info_text(source: str, index: int, pipeline: Pipeline | None) -> str:
+    info = pipeline.camera_info(source) if pipeline is not None else None
+    if pipeline is None:
+        status = "проверка недоступна: пайплайн выключен"
+        frame = "нет"
+        reconnects = 0
+        error = None
+    elif info is None:
+        status = "ожидает применения настройки"
+        frame = "нет"
+        reconnects = 0
+        error = None
+    else:
+        status = "доступна" if info["healthy"] else "нет связи или кадра"
+        frame = "есть" if info["has_frame"] else "ещё нет"
+        reconnects = int(info["reconnects"])
+        error = info["last_error"]
+    lines = [
+        f"📷 Камера {index + 1}",
+        f"Тип: {_camera_title(source)}",
+        f"Источник: {_camera_source_text(source)}",
+        f"Статус: {status}",
+        f"Последний кадр: {frame}",
+    ]
+    if reconnects:
+        lines.append(f"Переподключений: {reconnects}")
+    if error:
+        lines.append(f"Ошибка: {error}")
+    return "\n".join(lines)
+
+
+def _camera_detail_keyboard(index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📸 Тестовый снимок", callback_data=f"camera:test:{index}")],
+        [InlineKeyboardButton(text="✏️ Изменить список", callback_data="camera:edit")],
+        [InlineKeyboardButton(text="❓ Если не работает", callback_data="camera:help")],
+        [InlineKeyboardButton(text="◀ К списку камер", callback_data="panel:camera")],
+    ])
+
+
+async def _delete_test_snapshot(message: Message) -> None:
+    await asyncio.sleep(TEST_SNAPSHOT_TTL_SECONDS)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 class AccessMiddleware(BaseMiddleware):
     """Пускает дальше только админов и прокидывает зависимости в хендлеры."""
 
@@ -175,6 +272,11 @@ def _on(flag: bool) -> str:
     return "вкл" if flag else "выкл"
 
 
+def _ico(flag: bool) -> str:
+    """Эмодзи-индикатор вкл/выкл для быстрого считывания."""
+    return "🟢" if flag else "⚪"
+
+
 def _short_phrase(text: str, limit: int = 36) -> str:
     compact = " ".join((text or "").split())
     if len(compact) <= limit:
@@ -185,82 +287,108 @@ def _short_phrase(text: str, limit: int = 36) -> str:
 def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> InlineKeyboardMarkup:
     mode_next = "identity" if runtime.detect_mode == "presence" else "presence"
     det_next = _next_item(DETECTORS, runtime.detector_backend)
-    arm = _on(runtime.armed)
-    quiet = runtime.quiet_hours or "выкл"
-    exit_s = _on(runtime.notify_exit)
-    privacy = _on(runtime.privacy_outbound)
-    remote = _on(runtime.remote_processing)
     if voice is not None and voice.alarming:
         voice_s = "ТРЕВОГА"
+        voice_ico = "●"
     else:
-        voice_s = _on(runtime.voice_enabled)
+        voice_s = "голос"
+        voice_ico = _ico(runtime.voice_enabled)
     rows = [
         [
-            InlineKeyboardButton(text=f"Охрана: {arm}", callback_data="panel:arm"),
             InlineKeyboardButton(
-                text=f"Режим: {runtime.detect_mode} -> {mode_next}",
+                text=f"{_ico(runtime.armed)} Охрана {_on(runtime.armed)}",
+                callback_data="panel:arm",
+            ),
+            InlineKeyboardButton(
+                text=f"Режим: {runtime.detect_mode} → {mode_next}",
                 callback_data="panel:mode",
             ),
         ],
         [
-            InlineKeyboardButton(
-                text=f"Детектор: {runtime.detector_backend} (след. {det_next})",
-                callback_data="panel:detector",
-            ),
-            InlineKeyboardButton(
-                text=f"Устройство: {runtime.device}", callback_data="panel:device"
-            ),
+            InlineKeyboardButton(text="События", callback_data="panel:events"),
+            InlineKeyboardButton(text="Люди", callback_data="panel:people"),
         ],
         [
-            InlineKeyboardButton(text="YOLO-модель", callback_data="panel:model"),
-            InlineKeyboardButton(text="Различия моделей", callback_data="panel:model_help"),
+            InlineKeyboardButton(text="Превью", callback_data="panel:snapshot"),
+            InlineKeyboardButton(text="Камера", callback_data="panel:camera"),
         ],
         [
-            InlineKeyboardButton(text="Превью камеры", callback_data="panel:snapshot"),
+            InlineKeyboardButton(text="Детекция", callback_data="panel:detector"),
+            InlineKeyboardButton(text="Зоны", callback_data="panel:zones"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{voice_ico} {voice_s}", callback_data="voice:open"
+            ),
             InlineKeyboardButton(text="Здоровье", callback_data="panel:health"),
         ],
         [
-            InlineKeyboardButton(text="Люди", callback_data="panel:people"),
-            InlineKeyboardButton(text="События", callback_data="panel:events"),
-        ],
-        [
-            InlineKeyboardButton(text="Камера", callback_data="panel:camera"),
-            InlineKeyboardButton(text=f"Remote: {remote}", callback_data="panel:remote"),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"Порог {runtime.min_confidence:g}", callback_data="panel:confidence"
-            ),
-            InlineKeyboardButton(
-                text=f"Кулдаун {runtime.cooldown_seconds:g}с", callback_data="panel:cooldown"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"Интервал {runtime.detection_interval:g}с",
-                callback_data="panel:interval",
-            ),
-            InlineKeyboardButton(
-                text=f"Лицо {runtime.face_threshold:g}", callback_data="panel:face"
-            ),
-        ],
-        [
-            InlineKeyboardButton(text=f"Тихие: {quiet}", callback_data="panel:quiet"),
-            InlineKeyboardButton(text=f"Выход: {exit_s}", callback_data="panel:exit"),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"Приватные кадры: {privacy}", callback_data="panel:privacy"
-            ),
-        ],
-        [
-            InlineKeyboardButton(text="Зоны", callback_data="panel:zones"),
+            InlineKeyboardButton(text="Тонкая настройка", callback_data="panel:tune"),
             InlineKeyboardButton(text="Статус", callback_data="panel:status"),
         ],
         [
-            InlineKeyboardButton(text=f"Голос / тревога: {voice_s}", callback_data="voice:open"),
+            InlineKeyboardButton(text="Справка", callback_data="panel:help"),
         ],
-        [InlineKeyboardButton(text="Справка", callback_data="panel:help")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _tune_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
+    det_next = _next_item(DETECTORS, runtime.detector_backend)
+    dev_next = _next_item(DEVICES, runtime.device)
+    quiet = runtime.quiet_hours or "выкл"
+    remote = _on(runtime.remote_processing)
+    privacy = _on(runtime.privacy_outbound)
+    exit_s = _on(runtime.notify_exit)
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"🧠 Детектор: {runtime.detector_backend} → {det_next}",
+                callback_data="panel:detector",
+            ),
+            InlineKeyboardButton(
+                text=f"🖥 Устройство: {runtime.device} → {dev_next}",
+                callback_data="panel:device",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text="📦 Модель", callback_data="panel:model"),
+            InlineKeyboardButton(text="ℹ️ Различия", callback_data="panel:model_help"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"🎯 Порог {runtime.min_confidence:g}",
+                callback_data="panel:confidence",
+            ),
+            InlineKeyboardButton(
+                text=f"⏱ Кулдаун {runtime.cooldown_seconds:g}с",
+                callback_data="panel:cooldown",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"🔁 Интервал {runtime.detection_interval:g}с",
+                callback_data="panel:interval",
+            ),
+            InlineKeyboardButton(
+                text=f"👤 Лицо {runtime.face_threshold:g}",
+                callback_data="panel:face",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text=f"🌙 Тихие: {quiet}", callback_data="panel:quiet"),
+            InlineKeyboardButton(text=f"🚪 Выход: {exit_s}", callback_data="panel:exit"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"🔒 Приватность: {privacy}", callback_data="panel:privacy"
+            ),
+            InlineKeyboardButton(text=f"☁ Remote: {remote}", callback_data="panel:remote"),
+        ],
+        [
+            InlineKeyboardButton(text="🔊 Голос", callback_data="voice:open"),
+            InlineKeyboardButton(text="◀ Назад", callback_data="panel:open"),
+        ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -298,6 +426,13 @@ def _person_view_keyboard(person_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Ещё фото", callback_data=f"person:photo:{person_id}")],
         [InlineKeyboardButton(text="Удалить", callback_data=f"person:del:{person_id}")],
         [InlineKeyboardButton(text="Назад", callback_data="panel:people")],
+    ])
+
+
+def _capture_face_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сканировать лицо с камеры", callback_data="person:capture")],
+        [InlineKeyboardButton(text="Отмена", callback_data="person:add_cancel")],
     ])
 
 
@@ -514,33 +649,36 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
                  pipeline: Pipeline | None,
                  voice: VoiceEngine | None = None) -> str:
     face = _face(recognizer, pipeline)
-    face_s = "on" if face is not None and face.available() else "off/dummy"
-    remote = "on" if runtime.remote_processing else "off"
-    running = "on" if pipeline is not None and pipeline.running else "off"
+    face_s = "🟢 доступно" if face is not None and face.available() else "⚪ dummy"
+    remote_s = _ico(runtime.remote_processing)
+    running_s = _ico(pipeline is not None and pipeline.running)
     info = models.get_model(runtime.model_path)
     model_title = info.title if info else runtime.model_path
     quiet = runtime.quiet_hours or "выкл"
     lines = [
-        "Настройки DotEye:",
-        f"Охрана: {'вкл' if runtime.armed else 'выкл'}",
-        f"Тихие часы: {quiet}",
-        f"Пайплайн: {running}",
-        f"Режим: {runtime.detect_mode}",
-        f"Камера: {runtime.camera_source}",
-        f"Детектор задан: {runtime.detector_backend} (device={runtime.device})",
-        f"Модель: {model_title}",
-        f"imgsz: {runtime.imgsz}",
-        f"Мин. уверенность: {runtime.min_confidence}",
-        f"Кулдаун: {runtime.cooldown_seconds} сек",
-        f"Интервал: {runtime.detection_interval} сек",
-        f"Порог лица: {runtime.face_threshold}",
-        f"Распознавание: {face_s}",
-        f"Remote: {remote} ({runtime.remote_url or 'нет URL'})",
-        f"Уведомлять выход: {'да' if runtime.notify_exit else 'нет'}",
-        f"Приватные кадры: {'да' if runtime.privacy_outbound else 'нет'}",
-        f"Голос: {_on(runtime.voice_enabled)}, тревога {_on(runtime.voice_alarm_enabled)}",
-        f"Сирена: {_on(runtime.voice_siren_enabled)}, речь {_on(runtime.voice_speech_enabled)}",
-        f"Привет/пока: {_on(runtime.voice_welcome)}/{_on(runtime.voice_goodbye)}",
+        "👁 DotEye - статус",
+        "",
+        "🛡 Охрана",
+        f"{_ico(runtime.armed)} Охрана: {_on(runtime.armed)}",
+        f"🌙 Тихие часы: {quiet}",
+        f"{_ico(runtime.notify_exit)} Уведомлять выход: {_on(runtime.notify_exit)}",
+        f"{_ico(runtime.privacy_outbound)} Приватные кадры: {_on(runtime.privacy_outbound)}",
+        "",
+        "📹 Детекция",
+        f"{running_s} Пайплайн: {'работает' if running_s == '🟢' else 'остановлен'}",
+        f"🧭 Режим: {runtime.detect_mode}",
+        f"📷 Камера: {runtime.camera_source}",
+        f"🧠 Детектор: {runtime.detector_backend} (device={runtime.device})",
+        f"📦 Модель: {model_title}",
+        f"🔍 imgsz: {runtime.imgsz} · порог: {runtime.min_confidence:g}",
+        f"⏱ Кулдаун: {runtime.cooldown_seconds:g}с · интервал: {runtime.detection_interval:g}с",
+        f"👤 Порог лица: {runtime.face_threshold:g} · распознавание: {face_s}",
+        f"{remote_s} Remote: {'вкл' if runtime.remote_processing else 'выкл'} ({runtime.remote_url or 'нет URL'})",
+        "",
+        "🔊 Голос и тревога",
+        f"{_ico(runtime.voice_enabled)} Авто: {_on(runtime.voice_enabled)} · тревога {_on(runtime.voice_alarm_enabled)}",
+        f"{_ico(runtime.voice_siren_enabled)} Сирена: {_on(runtime.voice_siren_enabled)} · речь {_on(runtime.voice_speech_enabled)}",
+        f"👋 Привет/пока: {_on(runtime.voice_welcome)}/{_on(runtime.voice_goodbye)}",
     ]
     engine = voice if voice is not None else (
         pipeline.voice if pipeline is not None else None
@@ -549,6 +687,7 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
         lines.append(engine.status_line())
     if pipeline is not None:
         lines.append("")
+        lines.append("🩺 Здоровье")
         lines.append(pipeline.health_text())
     return "\n".join(lines)
 
@@ -689,9 +828,11 @@ async def _send_events_page(
 async def cmd_start(message: Message, settings: Settings) -> None:
     admin = "админ" if _is_admin(message, settings) else "гость"
     await message.answer(
-        f"DotEye на связи ({admin}).\n"
-        "Управление - /panel. Подключи камеру, выбери режим.\n"
-        "/help - все команды. /cancel - отменить ввод."
+        f"👁 DotEye на связи ({admin}).\n\n"
+        "🕹 Управление - /panel\n"
+        "📹 Подключи камеру через /camera, выбери режим.\n\n"
+        "❓ /help - все команды\n"
+        "✖ /cancel - отменить ввод"
     )
 
 
@@ -735,6 +876,15 @@ async def cb_open(cq: CallbackQuery, runtime: Runtime,
     await cq.answer()
 
 
+@router.callback_query(F.data == "panel:tune")
+async def cb_tune(cq: CallbackQuery, runtime: Runtime) -> None:
+    await cq.message.edit_text(
+        "⚙️ Тонкая настройка детекции, камер, зон и уведомлений:",
+        reply_markup=_tune_keyboard(runtime),
+    )
+    await cq.answer()
+
+
 @router.callback_query(F.data == "panel:status")
 async def cb_status(cq: CallbackQuery, runtime: Runtime,
                     recognizer: Recognizer | None, pipeline: Pipeline | None,
@@ -769,14 +919,18 @@ async def cb_arm(cq: CallbackQuery, runtime: Runtime,
 @router.callback_query(F.data == "panel:exit")
 async def cb_exit_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.notify_exit = not runtime.notify_exit
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.message.edit_text(
+        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+    )
     await cq.answer("Выход: " + ("вкл" if runtime.notify_exit else "выкл"))
 
 
 @router.callback_query(F.data == "panel:privacy")
 async def cb_privacy_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.privacy_outbound = not runtime.privacy_outbound
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.message.edit_text(
+        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+    )
     await cq.answer("Приватные кадры: " + ("вкл" if runtime.privacy_outbound else "выкл"))
 
 
@@ -792,14 +946,18 @@ async def cb_mode(
 @router.callback_query(F.data == "panel:detector")
 async def cb_detector(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.detector_backend = _next_item(DETECTORS, runtime.detector_backend)
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.message.edit_text(
+        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+    )
     await cq.answer(f"Детектор: {runtime.detector_backend}")
 
 
 @router.callback_query(F.data == "panel:device")
 async def cb_device(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.device = _next_item(DEVICES, runtime.device)
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.message.edit_text(
+        "⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime)
+    )
     await cq.answer(f"Устройство: {runtime.device}")
 
 
@@ -883,6 +1041,37 @@ async def cb_person_add(cq: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddPersonForm.name)
     await cq.message.answer("Имя человека (или «отмена»):")
     await cq.answer()
+
+
+@router.callback_query(F.data == "person:add_cancel")
+async def cb_person_add_cancel(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cq.message.answer("Добавление человека отменено.")
+    await cq.answer()
+
+
+@router.callback_query(F.data == "person:capture")
+async def cb_person_capture(
+    cq: CallbackQuery, state: FSMContext, storage: Storage, crypto: Crypto | None,
+    recognizer: Recognizer | None, pipeline: Pipeline | None,
+) -> None:
+    data = await state.get_data()
+    name = str(data.get("name") or "").strip()
+    if await state.get_state() != AddPersonForm.photo.state or not name:
+        await cq.answer("Сначала начни добавление человека.", show_alert=True)
+        return
+    face = _face(recognizer, pipeline)
+    if crypto is None or face is None or not face.available() or pipeline is None:
+        await cq.answer("Распознавание или камера недоступны.", show_alert=True)
+        return
+    embedding = await asyncio.to_thread(pipeline.capture_face_embedding)
+    if embedding is None:
+        await cq.answer("Лицо не найдено. Посмотри в камеру и повтори.", show_alert=True)
+        return
+    storage.upsert_person(name, crypto.encrypt(embedding))
+    await state.clear()
+    await cq.message.answer(f"«{name}» добавлен по кадру камеры. Фото не сохранено.")
+    await cq.answer("Лицо сохранено")
 
 
 @router.callback_query(F.data.startswith("person:del:"))
@@ -1146,14 +1335,106 @@ async def cb_voice_dismiss(cq: CallbackQuery, runtime: Runtime,
 
 
 @router.callback_query(F.data == "panel:camera")
-async def cb_camera(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+async def cb_camera(cq: CallbackQuery, runtime: Runtime) -> None:
+    await cq.message.edit_text(
+        "📷 Камеры\nВыберите камеру, чтобы посмотреть состояние и запросить "
+        "одноразовый тестовый снимок.",
+        reply_markup=_camera_keyboard(runtime),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("camera:view:"))
+async def cb_camera_view(cq: CallbackQuery, runtime: Runtime,
+                         pipeline: Pipeline | None) -> None:
+    try:
+        index = int(cq.data.split(":")[2])
+        source = runtime.camera_source.split("|")[index]
+    except (IndexError, ValueError):
+        await cq.answer("Камера уже изменилась. Обновите список.", show_alert=True)
+        return
+    await cq.message.edit_text(
+        _camera_info_text(source, index, pipeline),
+        reply_markup=_camera_detail_keyboard(index),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("camera:test:"))
+async def cb_camera_test(cq: CallbackQuery, runtime: Runtime,
+                         pipeline: Pipeline | None) -> None:
+    if pipeline is None:
+        await cq.answer("Пайплайн выключен - снимок недоступен.", show_alert=True)
+        return
+    try:
+        index = int(cq.data.split(":")[2])
+        source = runtime.camera_source.split("|")[index]
+    except (IndexError, ValueError):
+        await cq.answer("Камера уже изменилась. Обновите список.", show_alert=True)
+        return
+    jpeg = await asyncio.to_thread(pipeline.snapshot, source)
+    if jpeg is None:
+        await cq.answer("Кадр ещё не получен. Подождите несколько секунд.", show_alert=True)
+        return
+    sent = await cq.message.answer_photo(
+        BufferedInputFile(jpeg, filename=f"camera-{index + 1}-test.jpg"),
+        caption=(
+            f"Тестовый снимок: камера {index + 1}. "
+            f"Будет удалён через {TEST_SNAPSHOT_TTL_SECONDS} сек."
+        ),
+    )
+    # JPEG создаётся только в памяти. После отправки ссылка освобождается, а
+    # сообщение в Telegram удаляется отдельной задачей.
+    if sent is not None:
+        asyncio.create_task(_delete_test_snapshot(sent))
+    await cq.answer("Тестовый снимок отправлен")
+
+
+@router.callback_query(F.data == "camera:edit")
+async def cb_camera_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
     await state.set_state(CameraForm.source)
     await cq.message.answer(
-        f"Сейчас: {runtime.camera_source}\n"
-        "Отправь источник: 0, rtsp://..., http://...\n"
-        "Несколько камер через |  например  0|rtsp://host/stream\n"
-        "«отмена» - выйти."
+        "✏️ Настройка камер\n\n"
+        f"Текущий список: {runtime.camera_source}\n\n"
+        "Отправьте один источник или до четырёх через |.\n"
+        "• `0` - встроенная или USB-камера\n"
+        "• `rtsp://host/stream` - поток IP-камеры\n"
+        "• `http://host/video` - MJPEG-поток\n\n"
+        "Для сетевой камеры её хост должен быть в DOTEYE_ALLOWED_URL_HOSTS. "
+        "Нажмите «Инструкция», если не знаете адрес потока.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❓ Инструкция", callback_data="camera:help")],
+            [InlineKeyboardButton(text="Отмена", callback_data="camera:cancel")],
+        ]),
     )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "camera:help")
+async def cb_camera_help(cq: CallbackQuery) -> None:
+    await cq.message.answer(
+        "❓ Подсказки по подключению\n\n"
+        "1. Для USB-камеры начните с `0`; если камер несколько, попробуйте `1`.\n"
+        "2. Для IP-камеры используйте адрес RTSP или MJPEG из её приложения/инструкции. "
+        "Камера и DotEye должны быть в одной локальной сети.\n"
+        "3. Добавьте только имя или IP хоста камеры в DOTEYE_ALLOWED_URL_HOSTS, затем "
+        "повторите ввод.\n"
+        "4. После сохранения откройте камеру в этом меню и нажмите «Тестовый снимок».\n\n"
+        "Если кадра нет, проверьте питание камеры, адрес потока и доступность хоста из "
+        "устройства с DotEye. Не публикуйте поток камеры в интернет.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Ввести источник", callback_data="camera:edit")],
+            [InlineKeyboardButton(text="◀ К камерам", callback_data="panel:camera")],
+        ]),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "camera:cancel")
+async def cb_camera_cancel(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
+    await state.clear()
+    await cq.message.answer("Настройка камеры отменена.", reply_markup=_camera_keyboard(runtime))
     await cq.answer()
 
 
@@ -1161,7 +1442,7 @@ async def cb_camera(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> N
 async def cb_remote(cq: CallbackQuery, runtime: Runtime, state: FSMContext) -> None:
     if runtime.remote_processing:
         runtime.remote_processing = False
-        await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+        await cq.message.edit_text("⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime))
         await cq.answer("Remote выкл")
         return
     if not runtime.remote_url:
@@ -1171,7 +1452,7 @@ async def cb_remote(cq: CallbackQuery, runtime: Runtime, state: FSMContext) -> N
         await cq.answer()
         return
     runtime.remote_processing = True
-    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.message.edit_text("⚙️ Тонкая настройка:", reply_markup=_tune_keyboard(runtime))
     await cq.answer("Remote вкл")
 
 
@@ -1325,12 +1606,10 @@ async def cmd_people(message: Message, storage: Storage) -> None:
 
 
 @router.message(Command("camera"))
-async def cmd_camera(message: Message, state: FSMContext) -> None:
-    await state.set_state(CameraForm.source)
+async def cmd_camera(message: Message, runtime: Runtime) -> None:
     await message.answer(
-        "Отправь источник: 0 (вебка), rtsp://... или http://...\n"
-        "Несколько через |  Например: 0|rtsp://192.168.0.8/stream\n"
-        "«отмена» - выйти."
+        "📷 Камеры\nВыберите камеру или измените список источников.",
+        reply_markup=_camera_keyboard(runtime),
     )
 
 
@@ -1346,7 +1625,11 @@ async def proc_camera_source(message: Message, state: FSMContext, runtime: Runti
         await message.answer(f"Источник отклонён: {exc}")
         return
     await state.clear()
-    await message.answer(f"Источник задан: {runtime.camera_source}")
+    await message.answer(
+        "Список камер сохранён. Пайплайн применит изменение на следующем кадре. "
+        "Откройте камеру через минуту и запросите тестовый снимок.",
+        reply_markup=_camera_keyboard(runtime),
+    )
 
 
 @router.message(Command("confidence"))
@@ -1532,7 +1815,10 @@ async def proc_add_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(name=name)
     await state.set_state(AddPersonForm.photo)
-    await message.answer(f"Теперь пришли фото лица для «{name}».")
+    await message.answer(
+        f"Пришли фото лица для «{name}» или покажи лицо в камеру и нажми кнопку.",
+        reply_markup=_capture_face_keyboard(),
+    )
 
 
 @router.message(AddPersonForm.photo, F.photo)
@@ -1547,11 +1833,9 @@ async def proc_add_photo(
     name = data.get("name", "")
     face = _face(recognizer, pipeline)
     if face is None or not face.available():
-        storage.upsert_person(name, None)
-        await state.clear()
         await message.answer(
-            f"«{name}» добавлен без фото: распознавание лиц недоступно "
-            "(нет insightface)."
+            "Распознавание лиц недоступно. Установи зависимости распознавания "
+            "и перезапусти бота, затем повтори добавление."
         )
         return
 

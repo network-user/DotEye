@@ -65,12 +65,56 @@ def env(tmp_path: Path):
 def test_panel_keyboard_has_device_button(env) -> None:
     kb = bot._panel_keyboard(env.runtime)
     labels = [b.text for row in kb.inline_keyboard for b in row]
-    assert any("Устройство" in label for label in labels)
-    assert any("YOLO-модель" in label for label in labels)
     assert any("Охрана" in label for label in labels)
+    assert any("Режим" in label for label in labels)
+    assert any("События" in label for label in labels)
+    assert any("Люди" in label for label in labels)
+    assert any("Превью" in label for label in labels)
+    assert any("Камера" in label for label in labels)
     assert any("Здоровье" in label for label in labels)
-    assert any("след." in label for label in labels)
-    assert any("Голос" in label for label in labels)
+    assert any("Тонкая настройка" in label for label in labels)
+
+
+def test_tune_keyboard_contains_advanced_controls(env) -> None:
+    kb = bot._tune_keyboard(env.runtime)
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("Устройство" in label for label in labels)
+    assert any("Детектор" in label for label in labels)
+    assert any("Модель" in label for label in labels)
+    assert any("Порог" in label for label in labels)
+    assert any("Кулдаун" in label for label in labels)
+    assert any("Интервал" in label for label in labels)
+    assert any("Remote" in label for label in labels)
+
+
+def test_camera_keyboard_lists_sources_and_hides_credentials(env) -> None:
+    env.runtime.camera_source = "0|1"
+    kb = bot._camera_keyboard(env.runtime)
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("Камера 1" in label for label in labels)
+    assert any("Камера 2" in label for label in labels)
+    assert "user:password" not in bot._camera_source_text("rtsp://user:password@cam.local/live")
+
+
+@pytest.mark.asyncio
+async def test_camera_view_and_test_snapshot(env) -> None:
+    class Pipeline:
+        def camera_info(self, source: str):
+            assert source == "0"
+            return {"healthy": True, "has_frame": True, "reconnects": 0, "last_error": None}
+
+        def snapshot(self, source: str):
+            assert source == "0"
+            return b"jpeg"
+
+    pipeline = Pipeline()
+    cq = FakeCallback("camera:view:0")
+    await bot.cb_camera_view(cq, env.runtime, pipeline)  # type: ignore[arg-type]
+    assert "Камера 1" in cq.message.edits[-1][0]
+
+    cq = FakeCallback("camera:test:0")
+    await bot.cb_camera_test(cq, env.runtime, pipeline)  # type: ignore[arg-type]
+    assert cq.message.photos
 
 
 def test_model_keyboard_marks_current(env) -> None:

@@ -9,8 +9,8 @@ cryptography>=42.0
 ultralytics>=8.1
 
 # Опционально: распознавание лиц (identity mode)
-# insightface>=0.7.3
-# onnxruntime>=1.16
+insightface>=0.7.3
+onnxruntime>=1.16
 
 # Голос и тревога (SAPI на Windows, espeak на Linux)
 pyttsx3>=2.90

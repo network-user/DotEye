@@ -46,6 +46,7 @@ def test_runtime_voice_settings(tmp_path: Path) -> None:
     st = Storage(tmp_path / "voice-rt.db")
     rt = Runtime(settings, st)
     assert rt.voice_enabled is True
+    assert rt.voice_presence is True
     assert rt.voice_clear_on == "both"
     rt.voice_enabled = False
     rt.voice_volume = 0.4

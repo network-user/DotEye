@@ -25,6 +25,10 @@ class TTS(ABC):
     def available(self) -> bool:
         return False
 
+    @property
+    def last_error(self) -> str:
+        return ""
+
     def ensure(self) -> None:
         return None
 
@@ -71,6 +75,10 @@ class Pyttsx3TTS(TTS):
 
     def available(self) -> bool:
         return self._ok
+
+    @property
+    def last_error(self) -> str:
+        return self._error
 
     def ensure(self) -> None:
         if self._engine is not None or self._error:
@@ -201,6 +209,7 @@ class ChainTTS(TTS):
     def __init__(self, backends: list[TTS]) -> None:
         self._backends = backends
         self._active: TTS | None = None
+        self._last_error = ""
 
     @property
     def name(self) -> str:
@@ -210,6 +219,12 @@ class ChainTTS(TTS):
 
     def available(self) -> bool:
         return self._active is not None and self._active.available()
+
+    @property
+    def last_error(self) -> str:
+        if self._active is not None and self._active.available():
+            return self._active.last_error
+        return self._last_error
 
     def ensure(self) -> None:
         if self._active is not None:
@@ -224,6 +239,8 @@ class ChainTTS(TTS):
                 self._active = backend
                 print(f"[tts] backend={backend.name}")
                 return
+            if backend.last_error:
+                self._last_error = backend.last_error
         self._active = DummyTTS()
         print("[tts] нет синтезатора, только сирена")
 

@@ -527,6 +527,8 @@ class VoiceEngine:
                 print(f"[voice] say: {job.text[:80]}")
                 self._player.play_wav(wav)
             else:
+                detail = self._tts.last_error or "синтезатор не вернул аудио"
+                self.last_error = f"Синтез речи недоступен: {detail}"
                 print(f"[voice] tts пуст: {job.text[:80]}")
 
 

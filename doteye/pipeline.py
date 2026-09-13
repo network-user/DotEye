@@ -89,6 +89,7 @@ class Pipeline:
         self._lock = threading.Lock()
         self._preview_frame: np.ndarray | None = None
         self._preview_items: list[tuple[Box, str, tuple[int, int, int]]] = []
+        self._camera_previews: dict[str, tuple[np.ndarray, list[tuple[Box, str, tuple[int, int, int]]]]] = {}
         self._steps = 0
         self._remote_down = False
         self._poll_override: float | None = None
@@ -142,6 +143,8 @@ class Pipeline:
         print(f"[pipeline] camera -> {source}")
         old = self._cameras
         self._cameras = build_cameras(source)
+        with self._lock:
+            self._camera_previews.clear()
         self._camera_source = source
         self._trackers.clear()
         self._gates.clear()
@@ -452,6 +455,7 @@ class Pipeline:
             with self._lock:
                 self._preview_frame = frame
                 self._preview_items = preview_items
+                self._camera_previews[source] = (frame, preview_items)
 
         self._steps += 1
         # Retention is a potentially expensive write. A periodic wall-clock
@@ -483,11 +487,16 @@ class Pipeline:
     def running(self) -> bool:
         return self._running
 
-    def snapshot(self) -> bytes | None:
+    def snapshot(self, source: str | None = None) -> bytes | None:
         """Кэш последнего кадра. Не читает камеру (нет гонки с циклом)."""
         with self._lock:
-            frame = self._preview_frame
-            items = list(self._preview_items)
+            if source is None:
+                frame = self._preview_frame
+                items = list(self._preview_items)
+            else:
+                preview = self._camera_previews.get(source)
+                frame = preview[0] if preview is not None else None
+                items = list(preview[1]) if preview is not None else []
         if frame is None:
             return None
         if self._runtime.privacy_outbound:
@@ -495,6 +504,35 @@ class Pipeline:
         else:
             vis = annotate(frame, items) if items else frame
         return encode_jpeg(vis, self._runtime.jpeg_quality)
+
+    def camera_info(self, source: str) -> dict[str, object] | None:
+        """Состояние камеры для панели, без открытия или чтения источника."""
+        for name, camera in self._cameras:
+            if name == source:
+                with self._lock:
+                    has_frame = source in self._camera_previews
+                return {
+                    "healthy": bool(getattr(camera, "healthy", True)),
+                    "last_error": getattr(camera, "last_error", None),
+                    "reconnects": int(getattr(camera, "reconnects", 0)),
+                    "has_frame": has_frame,
+                }
+        return None
+
+    def capture_face_embedding(self) -> bytes | None:
+        """Снять эталон лица с последнего кадра камеры без сохранения фото."""
+        recognizer = self._recognizer
+        if recognizer is None or not recognizer.available():
+            return None
+        with self._lock:
+            frame = self._preview_frame.copy() if self._preview_frame is not None else None
+            boxes = [box for box, _label, _color in self._preview_items]
+        if frame is None:
+            return None
+        # Детектор уже выбрал человека. Берём его кроп, чтобы лицо случайного
+        # прохожего на дальнем плане не стало эталоном.
+        target = crop_box(frame, boxes[0], pad=0.1) if boxes else frame
+        return recognizer.embed(target) if target is not None else None
 
     def health_text(self) -> str:
         lines = [

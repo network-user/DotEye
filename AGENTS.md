@@ -115,7 +115,7 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_VOICE_SPEECH` | `1` = TTS |
 | `DOTEYE_VOICE_WELCOME` | `1` = «добро пожаловать, {name}» |
 | `DOTEYE_VOICE_GOODBYE` | `1` = прощание при выходе известного |
-| `DOTEYE_VOICE_PRESENCE` | `1` = фраза при любом входе в presence |
+| `DOTEYE_VOICE_PRESENCE` | `1` = фраза при любом входе в presence, по умолчанию включена |
 | `DOTEYE_VOICE_ARMED_ANNOUNCE` | `1` = озвучивать вкл/выкл охраны |
 | `DOTEYE_VOICE_ALARM_ON_PRESENCE` | `1` = тревога на любой вход в presence |
 | `DOTEYE_VOICE_MUTE_QUIET` | `1` = глушить приветствия в тихие часы (сирена нет) |
