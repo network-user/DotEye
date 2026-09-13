@@ -101,8 +101,8 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_QUIET_HOURS` | тихие часы `HH:MM-HH:MM` |
 | `DOTEYE_NOTIFY_EXIT` | `1` = уведомлять о выходе |
 | `DOTEYE_IMGSZ` | размер входа YOLO, по умолчанию 640 |
-| `DOTEYE_EVENTS_MAX` | лимит строк событий в БД |
-| `DOTEYE_EVENTS_TTL_DAYS` | TTL событий, дни |
+| `DOTEYE_EVENTS_MAX` | лимит строк событий в БД, по умолчанию 200 |
+| `DOTEYE_EVENTS_TTL_DAYS` | TTL событий, дни, по умолчанию 7 |
 | `DOTEYE_ZONES` | JSON зон кадра |
 | `DOTEYE_REMOTE_PROCESSING` | `1` = вынос инференса на сервер |
 | `DOTEYE_REMOTE_URL` | HTTPS-адрес remote-сервера; HTTP допустим только для loopback/development |

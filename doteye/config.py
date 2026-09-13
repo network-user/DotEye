@@ -206,8 +206,8 @@ class Settings:
     notify_exit: bool = field(default_factory=lambda: _env_bool("DOTEYE_NOTIFY_EXIT", "1"))
 
     # Хранение событий
-    events_max: int = field(default_factory=lambda: _env_int("DOTEYE_EVENTS_MAX", 500))
-    events_ttl_days: float = field(default_factory=lambda: _env_float("DOTEYE_EVENTS_TTL_DAYS", 14))
+    events_max: int = field(default_factory=lambda: _env_int("DOTEYE_EVENTS_MAX", 200))
+    events_ttl_days: float = field(default_factory=lambda: _env_float("DOTEYE_EVENTS_TTL_DAYS", 7))
 
     # Зоны кадра: JSON [{"name":"дверь","x1":0,"y1":0,"x2":0.5,"y2":1}]
     zones: str = field(default_factory=lambda: os.getenv("DOTEYE_ZONES", ""))

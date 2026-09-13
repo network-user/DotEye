@@ -129,4 +129,5 @@ def test_notification_outbox_is_durable_and_idempotent(tmp_path: Path) -> None:
     assert due[0]["last_error"] == "temporary error"
     st.mark_notification_sent(first)
     assert st.claim_due_notifications(now=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat()) == []
+    assert st._conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 0
     st.close()

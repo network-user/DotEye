@@ -96,7 +96,8 @@ class Pipeline:
         self._identity_cache_revision = -1
         self._identity_references: list[tuple[str, bytes]] = []
         self._identity_attempts: dict[tuple[str, int], tuple[float, int]] = {}
-        self._last_prune_at = time.monotonic()
+        # Первый шаг сразу применяет retention к архиву после перезапуска.
+        self._last_prune_at = 0.0
         self._voice: VoiceEngine | None = None
         self.use_motion_gate = True
 
@@ -460,7 +461,7 @@ class Pipeline:
         self._steps += 1
         # Retention is a potentially expensive write. A periodic wall-clock
         # task keeps it out of the hot frame path without letting it disappear.
-        if time.monotonic() - self._last_prune_at >= 300.0:
+        if time.monotonic() - self._last_prune_at >= 60.0:
             self._storage.prune_events(
                 self._runtime.events_max, self._runtime.events_ttl_days,
             )

@@ -219,6 +219,24 @@ class Storage:
                 "FROM people p ORDER BY p.name"
             ).fetchall()
 
+    def list_people_paged(self, limit: int, offset: int) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT p.id, p.name, p.created_at, "
+                "  (SELECT COUNT(*) FROM person_embeddings pe "
+                "    WHERE pe.person_id = p.id) AS face_count, "
+                "  (SELECT COUNT(*) FROM person_embeddings pe "
+                "    WHERE pe.person_id = p.id) > 0 AS has_face "
+                "FROM people p ORDER BY p.name LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+
+    def count_people(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM people").fetchone()
+            return int(row[0]) if row else 0
+
+
     def list_people_with_embeddings(self) -> list[dict[str, Any]]:
         with self._lock:
             people = self._conn.execute(
@@ -427,9 +445,8 @@ class Storage:
     def mark_notification_sent(self, notification_id: int) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE notification_outbox SET sent_at = ?, last_error = NULL "
-                "WHERE id = ?",
-                (_now(), int(notification_id)),
+                "DELETE FROM notification_outbox WHERE id = ?",
+                (int(notification_id),),
             )
             self._conn.commit()
 
@@ -450,6 +467,11 @@ class Storage:
         """Удалить старые события. Возвращает число удалённых строк."""
         deleted = 0
         with self._lock:
+            # Старые версии оставляли доставленные outbox-строки с JPEG и
+            # ссылкой на событие. Они не нужны после отправки и мешают prune.
+            sent_cleanup = self._conn.execute(
+                "DELETE FROM notification_outbox WHERE sent_at IS NOT NULL"
+            ).rowcount or 0
             if ttl_days is not None and ttl_days > 0:
                 cutoff = (
                     datetime.now(timezone.utc) - timedelta(days=float(ttl_days))
@@ -470,8 +492,13 @@ class Storage:
                         "DELETE FROM events WHERE id < ?", (int(cutoff_row["id"]),)
                     )
                     deleted += cur.rowcount or 0
-            if deleted:
+            if deleted or sent_cleanup:
                 self._conn.commit()
+            if deleted:
+                # Убирает освобождённые страницы из WAL без тяжёлого VACUUM в
+                # горячем цикле детектора. Основной файл SQLite переиспользует
+                # свободное место под следующие события.
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return deleted
 
     # -- settings -------------------------------------------------------

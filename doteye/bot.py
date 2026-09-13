@@ -70,7 +70,7 @@ HELP = (
 DETECTORS = ["auto", "yolo", "yunet", "motion"]
 DEVICES = ["cpu", "cuda", "mps"]
 EVENTS_PAGE = 3
-AUDIT_PAGE = 30
+PEOPLE_PAGE = 6
 OUTBOX_POLL_SECONDS = 1.0
 OUTBOX_BATCH_SIZE = 20
 OUTBOX_MAX_RETRY_SECONDS = 3600
@@ -308,7 +308,6 @@ def _short_phrase(text: str, limit: int = 36) -> str:
 
 def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> InlineKeyboardMarkup:
     mode_next = "identity" if runtime.detect_mode == "presence" else "presence"
-    det_next = _next_item(DETECTORS, runtime.detector_backend)
     if voice is not None and voice.alarming:
         voice_s = "ТРЕВОГА"
         voice_ico = "●"
@@ -429,9 +428,10 @@ def _model_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _people_keyboard(storage: Storage) -> InlineKeyboardMarkup:
+def _people_keyboard(storage: Storage, page: int = 0) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for row in storage.list_people():
+    total = storage.count_people()
+    for row in storage.list_people_paged(PEOPLE_PAGE, page * PEOPLE_PAGE):
         n = int(row["face_count"] or 0)
         rows.append([
             InlineKeyboardButton(
@@ -440,8 +440,21 @@ def _people_keyboard(storage: Storage) -> InlineKeyboardMarkup:
             )
         ])
     rows.append([InlineKeyboardButton(text="Добавить", callback_data="person:add")])
+    nav = _people_nav(page, total)
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="Назад", callback_data="panel:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _people_nav(page: int, total: int) -> list[InlineKeyboardButton]:
+    buttons: list[InlineKeyboardButton] = []
+    pages = max(1, (total + PEOPLE_PAGE - 1) // PEOPLE_PAGE)
+    if page > 0:
+        buttons.append(InlineKeyboardButton(text="←", callback_data=f"people:page:{page - 1}"))
+    if page + 1 < pages:
+        buttons.append(InlineKeyboardButton(text="→", callback_data=f"people:page:{page + 1}"))
+    return buttons
 
 
 def _person_view_keyboard(person_id: int) -> InlineKeyboardMarkup:
@@ -449,6 +462,18 @@ def _person_view_keyboard(person_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Ещё фото", callback_data=f"person:photo:{person_id}")],
         [InlineKeyboardButton(text="Удалить", callback_data=f"person:del:{person_id}")],
         [InlineKeyboardButton(text="Назад", callback_data="panel:people")],
+    ])
+
+
+def _person_confirm_keyboard(person_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Удалить навсегда",
+                callback_data=f"person:delconfirm:{person_id}",
+            )
+        ],
+        [InlineKeyboardButton(text="Отмена", callback_data=f"person:view:{person_id}")],
     ])
 
 
@@ -461,10 +486,12 @@ def _capture_face_keyboard() -> InlineKeyboardMarkup:
 
 def _events_nav(page: int, total: int) -> InlineKeyboardMarkup:
     buttons: list[InlineKeyboardButton] = []
+    pages = max(1, (total + EVENTS_PAGE - 1) // EVENTS_PAGE)
     if page > 0:
-        buttons.append(InlineKeyboardButton(text="←", callback_data=f"events:page:{page - 1}"))
+        buttons.append(InlineKeyboardButton(text="← Новее", callback_data=f"events:page:{page - 1}"))
+    buttons.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="events:noop"))
     if (page + 1) * EVENTS_PAGE < total:
-        buttons.append(InlineKeyboardButton(text="→", callback_data=f"events:page:{page + 1}"))
+        buttons.append(InlineKeyboardButton(text="Старее →", callback_data=f"events:page:{page + 1}"))
     buttons.append(InlineKeyboardButton(text="Назад", callback_data="panel:open"))
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
@@ -1073,9 +1100,16 @@ async def cb_snapshot(cq: CallbackQuery, pipeline: Pipeline | None) -> None:
 
 @router.callback_query(F.data == "panel:people")
 async def cb_people(cq: CallbackQuery, storage: Storage) -> None:
-    rows = storage.list_people()
-    text = "Люди:" if rows else "Список людей пуст."
-    await cq.message.edit_text(text, reply_markup=_people_keyboard(storage))
+    total = storage.count_people()
+    text = "Люди:" if total else "Список людей пуст."
+    await cq.message.edit_text(text, reply_markup=_people_keyboard(storage, 0))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("people:page:"))
+async def cb_people_page(cq: CallbackQuery, storage: Storage) -> None:
+    page = int(cq.data.split(":")[2])
+    await cq.message.edit_text("Люди:", reply_markup=_people_keyboard(storage, page))
     await cq.answer()
 
 
@@ -1136,6 +1170,22 @@ async def cb_person_capture(
 async def cb_person_del(cq: CallbackQuery, storage: Storage) -> None:
     person_id = int(cq.data.split(":")[2])
     person = storage.get_person_by_id(person_id)
+    if person is None:
+        await cq.answer("Не найден", show_alert=True)
+        return
+    n = len(storage.embeddings_for(person_id))
+    photo_note = f" и {n} эталонов" if n else ""
+    await cq.message.edit_text(
+        f"Удалить «{person['name']}»{photo_note}?\nЭто действие необратимо.",
+        reply_markup=_person_confirm_keyboard(person_id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("person:delconfirm:"))
+async def cb_person_del_confirm(cq: CallbackQuery, storage: Storage) -> None:
+    person_id = int(cq.data.split(":")[2])
+    person = storage.get_person_by_id(person_id)
     name = person["name"] if person else "?"
     ok = storage.delete_person_by_id(person_id)
     text = f"Удалён: {name}" if ok else "Не найден."
@@ -1171,6 +1221,11 @@ async def cb_events_page(cq: CallbackQuery, storage: Storage,
     page = int(cq.data.split(":")[2])
     await cq.answer()
     await _send_events_page(cq.message, storage, crypto, runtime, page)
+
+
+@router.callback_query(F.data == "events:noop")
+async def cb_events_noop(cq: CallbackQuery) -> None:
+    await cq.answer()
 
 
 @router.callback_query(F.data.startswith("event:who:"))
@@ -1696,7 +1751,7 @@ async def cmd_people(message: Message, storage: Storage) -> None:
 @router.message(Command("camera"))
 async def cmd_camera(message: Message, runtime: Runtime) -> None:
     await message.answer(
-        "📷 Камеры\nВыберите камеру или измените список источников.",
+        "Камеры\nВыберите камеру или измените список источников.",
         reply_markup=_camera_keyboard(runtime),
     )
 
