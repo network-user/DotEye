@@ -242,6 +242,12 @@ class Settings:
     voice_volume: float = field(default_factory=lambda: _env_float("DOTEYE_VOICE_VOLUME", 0.8))
     voice_rate: float = field(default_factory=lambda: _env_float("DOTEYE_VOICE_RATE", 1.0))
     voice_tts_voice: str = field(default_factory=lambda: os.getenv("DOTEYE_VOICE_TTS_VOICE", ""))
+    voice_alarm_tts_voice: str = field(
+        default_factory=lambda: os.getenv("DOTEYE_VOICE_ALARM_TTS_VOICE", "")
+    )
+    voice_welcome_tts_voice: str = field(
+        default_factory=lambda: os.getenv("DOTEYE_VOICE_WELCOME_TTS_VOICE", "")
+    )
     voice_cooldown_seconds: float = field(
         default_factory=lambda: _env_float("DOTEYE_VOICE_COOLDOWN_SECONDS", 20.0)
     )

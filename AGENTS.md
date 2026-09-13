@@ -126,6 +126,8 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_VOICE_VOLUME` | громкость 0..1 |
 | `DOTEYE_VOICE_RATE` | скорость речи 0.4..2.5 |
 | `DOTEYE_VOICE_TTS_VOICE` | id голоса TTS |
+| `DOTEYE_VOICE_ALARM_TTS_VOICE` | отдельный id голоса TTS для тревоги; пусто = общий |
+| `DOTEYE_VOICE_WELCOME_TTS_VOICE` | отдельный id голоса TTS для приветствия/прощания; пусто = общий |
 | `DOTEYE_VOICE_COOLDOWN_SECONDS` | пауза повторного приветствия, сек |
 
 Не читай `.env`. Не коммить секреты.

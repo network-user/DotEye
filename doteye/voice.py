@@ -83,6 +83,7 @@ class VoiceJob:
     text: str = ""
     siren: bool = False
     interrupt: bool = False
+    voice_slot: str = "default"
     future: Future[list[tuple[str, str]]] | None = None
 
 
@@ -188,7 +189,7 @@ class VoiceEngine:
     def test_alarm(self) -> None:
         phrase = self._phrase("stranger")
         self._enqueue(VoiceJob(
-            kind="test", text=phrase, siren=True, interrupt=True,
+            kind="test", text=phrase, siren=True, interrupt=True, voice_slot="alarm",
         ))
 
     def trigger_alarm(self, text: str | None = None) -> bool:
@@ -369,7 +370,7 @@ class VoiceEngine:
             self._empty_since = None
             text = phrase or self._phrase("stranger")
             self._enqueue(VoiceJob(
-                kind="alarm", text=text, siren=True, interrupt=True,
+                kind="alarm", text=text, siren=True, interrupt=True, voice_slot="alarm",
             ))
             where = f" камера {source}" if source else ""
             zone_s = f", зона {zone}" if zone else ""
@@ -413,7 +414,7 @@ class VoiceEngine:
             text = " ".join(p for p in parts if p)
             if text:
                 self._enqueue(VoiceJob(
-                    kind="speech", text=text, siren=False, interrupt=True,
+                    kind="speech", text=text, siren=False, interrupt=True, voice_slot="alarm",
                 ))
         return VoiceNotice("alarm_cleared", caption)
 
@@ -435,7 +436,7 @@ class VoiceEngine:
             return
         self._last_loop_at = now
         self._enqueue(VoiceJob(
-            kind="alarm", text=self._phrase("repeat"), siren=True,
+            kind="alarm", text=self._phrase("repeat"), siren=True, voice_slot="alarm",
         ))
 
     def _cooldown_ok(self, key: str, now: float) -> bool:
@@ -455,7 +456,7 @@ class VoiceEngine:
         if not text:
             return
         self._welcome_at[key] = now
-        self._enqueue(VoiceJob(kind="speech", text=text))
+        self._enqueue(VoiceJob(kind="speech", text=text, voice_slot="welcome"))
 
     def _maybe_goodbye(self, name: str, now: float) -> None:
         key = f"out:{name}"
@@ -467,7 +468,7 @@ class VoiceEngine:
         if not text:
             return
         self._welcome_at[key] = now
-        self._enqueue(VoiceJob(kind="speech", text=text))
+        self._enqueue(VoiceJob(kind="speech", text=text, voice_slot="welcome"))
 
     def _enqueue(self, job: VoiceJob) -> None:
         if job.text:
@@ -509,7 +510,7 @@ class VoiceEngine:
     def _play_job(self, job: VoiceJob) -> None:
         volume = max(0.0, min(1.0, self._runtime.voice_volume))
         rate = max(0.4, min(2.5, self._runtime.voice_rate))
-        voice_id = self._runtime.voice_tts_voice
+        voice_id = self._voice_id(job.voice_slot)
         want_siren = job.siren and self._can_siren()
         want_speech = bool(job.text) and (
             job.kind == "manual" or self._runtime.voice_speech_enabled
@@ -530,6 +531,13 @@ class VoiceEngine:
                 detail = self._tts.last_error or "синтезатор не вернул аудио"
                 self.last_error = f"Синтез речи недоступен: {detail}"
                 print(f"[voice] tts пуст: {job.text[:80]}")
+
+    def _voice_id(self, slot: str) -> str:
+        if slot == "alarm":
+            return self._runtime.voice_alarm_tts_voice or self._runtime.voice_tts_voice
+        if slot == "welcome":
+            return self._runtime.voice_welcome_tts_voice or self._runtime.voice_tts_voice
+        return self._runtime.voice_tts_voice
 
 
 def build_voice(

@@ -461,6 +461,28 @@ class Runtime:
         self._storage.set("voice_tts_voice", text)
 
     @property
+    def voice_alarm_tts_voice(self) -> str:
+        return self._get_str("voice_alarm_tts_voice", self._settings.voice_alarm_tts_voice)
+
+    @voice_alarm_tts_voice.setter
+    def voice_alarm_tts_voice(self, value: str) -> None:
+        self._set_voice_id("voice_alarm_tts_voice", value)
+
+    @property
+    def voice_welcome_tts_voice(self) -> str:
+        return self._get_str("voice_welcome_tts_voice", self._settings.voice_welcome_tts_voice)
+
+    @voice_welcome_tts_voice.setter
+    def voice_welcome_tts_voice(self, value: str) -> None:
+        self._set_voice_id("voice_welcome_tts_voice", value)
+
+    def _set_voice_id(self, key: str, value: str) -> None:
+        text = (value or "").strip()
+        if len(text) > 256:
+            raise ConfigurationError(f"{key}: идентификатор длиннее 256 символов")
+        self._storage.set(key, text)
+
+    @property
     def voice_cooldown_seconds(self) -> float:
         return max(0.0, self._get_float(
             "voice_cooldown_seconds", self._settings.voice_cooldown_seconds

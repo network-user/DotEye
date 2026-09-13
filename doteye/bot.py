@@ -41,11 +41,11 @@ from doteye.voice import CLEAR_ON_VALUES, DEFAULT_PHRASES, PHRASE_TITLES, VoiceE
 from doteye.zones import Zone, dump_zones, parse_zones
 
 HELP = (
-    "👁 DotEye - кто зашёл в комнату.\n\n"
-    "🕹 Управление\n"
+    "DotEye - кто зашёл в комнату.\n\n"
+    "Управление\n"
     "/panel - админ-панель (кнопки)\n"
     "/status - текущие настройки\n\n"
-    "📹 Видео и детекция\n"
+    "Видео и детекция\n"
     "/camera - источник кадров (несколько через | )\n"
     "/detector - auto | yolo | yunet | motion\n"
     "/model - выбрать YOLO-модель\n"
@@ -53,15 +53,15 @@ HELP = (
     "/mode - presence <-> identity\n"
     "/confidence - порог детекции (0..1)\n"
     "/cooldown - пауза повторного входа, сек\n\n"
-    "👥 Люди\n"
+    "Люди\n"
     "/people - известные люди\n"
     "/add - добавить человека (имя + фото)\n"
     "/remove - удалить человека\n\n"
-    "🔔 События и голос\n"
+    "События и голос\n"
     "/events - последние события\n"
     "/say - сказать вслух через динамики\n"
     "/alarm - ручная тревога (/alarm off - снять)\n\n"
-    "ℹ️ Прочее\n"
+    "Прочее\n"
     "/help - эта справка\n"
     "/cancel - отменить текущий ввод"
 )
@@ -343,50 +343,50 @@ def _tune_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"🧠 Детектор: {runtime.detector_backend} → {det_next}",
+                text=f"Детектор: {runtime.detector_backend} → {det_next}",
                 callback_data="panel:detector",
             ),
             InlineKeyboardButton(
-                text=f"🖥 Устройство: {runtime.device} → {dev_next}",
+                text=f"Устройство: {runtime.device} → {dev_next}",
                 callback_data="panel:device",
             ),
         ],
         [
-            InlineKeyboardButton(text="📦 Модель", callback_data="panel:model"),
-            InlineKeyboardButton(text="ℹ️ Различия", callback_data="panel:model_help"),
+            InlineKeyboardButton(text="Модель", callback_data="panel:model"),
+            InlineKeyboardButton(text="Различия", callback_data="panel:model_help"),
         ],
         [
             InlineKeyboardButton(
-                text=f"🎯 Порог {runtime.min_confidence:g}",
+                text=f"Порог {runtime.min_confidence:g}",
                 callback_data="panel:confidence",
             ),
             InlineKeyboardButton(
-                text=f"⏱ Кулдаун {runtime.cooldown_seconds:g}с",
+                text=f"Кулдаун {runtime.cooldown_seconds:g}с",
                 callback_data="panel:cooldown",
             ),
         ],
         [
             InlineKeyboardButton(
-                text=f"🔁 Интервал {runtime.detection_interval:g}с",
+                text=f"Интервал {runtime.detection_interval:g}с",
                 callback_data="panel:interval",
             ),
             InlineKeyboardButton(
-                text=f"👤 Лицо {runtime.face_threshold:g}",
+                text=f"Лицо {runtime.face_threshold:g}",
                 callback_data="panel:face",
             ),
         ],
         [
-            InlineKeyboardButton(text=f"🌙 Тихие: {quiet}", callback_data="panel:quiet"),
-            InlineKeyboardButton(text=f"🚪 Выход: {exit_s}", callback_data="panel:exit"),
+            InlineKeyboardButton(text=f"Тихие: {quiet}", callback_data="panel:quiet"),
+            InlineKeyboardButton(text=f"Выход: {exit_s}", callback_data="panel:exit"),
         ],
         [
             InlineKeyboardButton(
-                text=f"🔒 Приватность: {privacy}", callback_data="panel:privacy"
+                text=f"Приватность: {privacy}", callback_data="panel:privacy"
             ),
-            InlineKeyboardButton(text=f"☁ Remote: {remote}", callback_data="panel:remote"),
+            InlineKeyboardButton(text=f"Remote: {remote}", callback_data="panel:remote"),
         ],
         [
-            InlineKeyboardButton(text="🔊 Голос", callback_data="voice:open"),
+            InlineKeyboardButton(text="Голос", callback_data="voice:open"),
             InlineKeyboardButton(text="◀ Назад", callback_data="panel:open"),
         ],
     ]
@@ -625,23 +625,38 @@ def _phrase_keyboard(runtime: Runtime) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+_VOICE_SLOTS = {
+    "default": ("Обычные фразы", "voice_tts_voice"),
+    "alarm": ("Тревога", "voice_alarm_tts_voice"),
+    "welcome": ("Приветствие и прощание", "voice_welcome_tts_voice"),
+}
+
+
+def _voice_slots_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=title, callback_data=f"voice:slot:{slot}")]
+        for slot, (title, _field) in _VOICE_SLOTS.items()
+    ] + [[InlineKeyboardButton(text="Назад", callback_data="voice:open")]])
+
+
 def _voices_keyboard(
-    runtime: Runtime, voices: list[tuple[str, str]]
+    runtime: Runtime, voices: list[tuple[str, str]], slot: str
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    current = runtime.voice_tts_voice
+    _title, field = _VOICE_SLOTS[slot]
+    current = str(getattr(runtime, field))
     for i, (vid, title) in enumerate(voices[:15]):
         mark = " [текущий]" if vid == current else ""
         rows.append([
             InlineKeyboardButton(
                 text=f"{_short_phrase(title, 48)}{mark}",
-                callback_data=f"voice:vset:{i}",
+                callback_data=f"voice:vset:{slot}:{i}",
             )
         ])
     rows.append([
-        InlineKeyboardButton(text="Сбросить голос", callback_data="voice:vset:-1")
+        InlineKeyboardButton(text="Использовать обычный голос", callback_data=f"voice:vset:{slot}:-1")
     ])
-    rows.append([InlineKeyboardButton(text="Назад", callback_data="voice:open")])
+    rows.append([InlineKeyboardButton(text="К профилям", callback_data="voice:voices")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -649,36 +664,37 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
                  pipeline: Pipeline | None,
                  voice: VoiceEngine | None = None) -> str:
     face = _face(recognizer, pipeline)
-    face_s = "🟢 доступно" if face is not None and face.available() else "⚪ dummy"
+    face_s = "● доступно" if face is not None and face.available() else "○ dummy"
     remote_s = _ico(runtime.remote_processing)
-    running_s = _ico(pipeline is not None and pipeline.running)
+    running = pipeline is not None and pipeline.running
+    running_s = _ico(running)
     info = models.get_model(runtime.model_path)
     model_title = info.title if info else runtime.model_path
     quiet = runtime.quiet_hours or "выкл"
     lines = [
-        "👁 DotEye - статус",
+        "DotEye - статус",
         "",
-        "🛡 Охрана",
+        "Охрана",
         f"{_ico(runtime.armed)} Охрана: {_on(runtime.armed)}",
-        f"🌙 Тихие часы: {quiet}",
+        f"Тихие часы: {quiet}",
         f"{_ico(runtime.notify_exit)} Уведомлять выход: {_on(runtime.notify_exit)}",
         f"{_ico(runtime.privacy_outbound)} Приватные кадры: {_on(runtime.privacy_outbound)}",
         "",
-        "📹 Детекция",
-        f"{running_s} Пайплайн: {'работает' if running_s == '🟢' else 'остановлен'}",
-        f"🧭 Режим: {runtime.detect_mode}",
-        f"📷 Камера: {runtime.camera_source}",
-        f"🧠 Детектор: {runtime.detector_backend} (device={runtime.device})",
-        f"📦 Модель: {model_title}",
-        f"🔍 imgsz: {runtime.imgsz} · порог: {runtime.min_confidence:g}",
-        f"⏱ Кулдаун: {runtime.cooldown_seconds:g}с · интервал: {runtime.detection_interval:g}с",
-        f"👤 Порог лица: {runtime.face_threshold:g} · распознавание: {face_s}",
+        "Детекция",
+        f"{running_s} Пайплайн: {'работает' if running else 'остановлен'}",
+        f"Режим: {runtime.detect_mode}",
+        f"Камера: {runtime.camera_source}",
+        f"Детектор: {runtime.detector_backend} (device={runtime.device})",
+        f"Модель: {model_title}",
+        f"imgsz: {runtime.imgsz} · порог: {runtime.min_confidence:g}",
+        f"Кулдаун: {runtime.cooldown_seconds:g}с · интервал: {runtime.detection_interval:g}с",
+        f"Порог лица: {runtime.face_threshold:g} · распознавание: {face_s}",
         f"{remote_s} Remote: {'вкл' if runtime.remote_processing else 'выкл'} ({runtime.remote_url or 'нет URL'})",
         "",
-        "🔊 Голос и тревога",
+        "Голос и тревога",
         f"{_ico(runtime.voice_enabled)} Авто: {_on(runtime.voice_enabled)} · тревога {_on(runtime.voice_alarm_enabled)}",
         f"{_ico(runtime.voice_siren_enabled)} Сирена: {_on(runtime.voice_siren_enabled)} · речь {_on(runtime.voice_speech_enabled)}",
-        f"👋 Привет/пока: {_on(runtime.voice_welcome)}/{_on(runtime.voice_goodbye)}",
+        f"Привет/пока: {_on(runtime.voice_welcome)}/{_on(runtime.voice_goodbye)}",
     ]
     engine = voice if voice is not None else (
         pipeline.voice if pipeline is not None else None
@@ -687,7 +703,7 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
         lines.append(engine.status_line())
     if pipeline is not None:
         lines.append("")
-        lines.append("🩺 Здоровье")
+        lines.append("Здоровье")
         lines.append(pipeline.health_text())
     return "\n".join(lines)
 
@@ -828,11 +844,11 @@ async def _send_events_page(
 async def cmd_start(message: Message, settings: Settings) -> None:
     admin = "админ" if _is_admin(message, settings) else "гость"
     await message.answer(
-        f"👁 DotEye на связи ({admin}).\n\n"
-        "🕹 Управление - /panel\n"
-        "📹 Подключи камеру через /camera, выбери режим.\n\n"
-        "❓ /help - все команды\n"
-        "✖ /cancel - отменить ввод"
+        f"DotEye на связи ({admin}).\n\n"
+        "Управление - /panel\n"
+        "Подключи камеру через /camera, выбери режим.\n\n"
+        "/help - все команды\n"
+        "/cancel - отменить ввод"
     )
 
 
@@ -1254,13 +1270,29 @@ async def cb_voice_voices(cq: CallbackQuery, runtime: Runtime,
         await cq.message.edit_text(
             "TTS-голоса не найдены. На Windows нужен голосовой пакет "
             "(например Ирина), на Linux - espeak-ng.",
-            reply_markup=_voices_keyboard(runtime, []),
+            reply_markup=_voice_slots_keyboard(),
         )
         await cq.answer()
         return
     await cq.message.edit_text(
-        "Голос синтезатора:",
-        reply_markup=_voices_keyboard(runtime, voices),
+        "Выбери профиль, для которого нужно назначить голос:",
+        reply_markup=_voice_slots_keyboard(),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("voice:slot:"))
+async def cb_voice_slot(cq: CallbackQuery, runtime: Runtime,
+                        voice: VoiceEngine | None = None) -> None:
+    slot = cq.data.split(":", 2)[2]
+    if slot not in _VOICE_SLOTS or voice is None:
+        await cq.answer("Голосовой движок или профиль недоступны.", show_alert=True)
+        return
+    voices = await asyncio.to_thread(voice.list_voices)
+    title, _field = _VOICE_SLOTS[slot]
+    await cq.message.edit_text(
+        f"Голос для профиля «{title}»:",
+        reply_markup=_voices_keyboard(runtime, voices, slot),
     )
     await cq.answer()
 
@@ -1271,20 +1303,28 @@ async def cb_voice_voice_set(cq: CallbackQuery, runtime: Runtime,
     if voice is None:
         await cq.answer("Голосовой движок не создан", show_alert=True)
         return
-    idx = int(cq.data.split(":")[2])
+    parts = cq.data.split(":")
+    if len(parts) != 4 or parts[2] not in _VOICE_SLOTS:
+        await cq.answer("Неизвестный профиль голоса", show_alert=True)
+        return
+    slot, idx = parts[2], int(parts[3])
+    title, field = _VOICE_SLOTS[slot]
     if idx < 0:
-        runtime.voice_tts_voice = ""
-        await _edit_voice_panel(cq, runtime, voice)
-        await cq.answer("Голос сброшен")
+        setattr(runtime, field, "")
+        await cq.message.edit_text(
+            f"Профиль «{title}» использует обычный голос.",
+            reply_markup=_voice_slots_keyboard(),
+        )
+        await cq.answer("Сохранено")
         return
     voices = await asyncio.to_thread(voice.list_voices)
     if idx >= len(voices):
         await cq.answer("Голос не найден", show_alert=True)
         return
-    runtime.voice_tts_voice = voices[idx][0]
+    setattr(runtime, field, voices[idx][0])
     await cq.message.edit_text(
-        f"Голос: {voices[idx][1]}",
-        reply_markup=_voices_keyboard(runtime, voices),
+        f"Профиль «{title}»: {voices[idx][1]}",
+        reply_markup=_voices_keyboard(runtime, voices, slot),
     )
     await cq.answer("Сохранено")
 
