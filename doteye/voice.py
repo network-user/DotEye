@@ -338,7 +338,7 @@ class VoiceEngine:
         first = self._last_armed is None
         changed = self._last_armed is not None and armed != self._last_armed
         self._last_armed = armed
-        if not armed:
+        if not armed and changed:
             self._clear_alarm(who=None, reason="disarm", announce=False)
         if first and not force_announce:
             return

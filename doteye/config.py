@@ -193,6 +193,9 @@ class Settings:
     detection_interval: float = field(default_factory=lambda: _env_float("DOTEYE_DETECTION_INTERVAL", 1.0))
     cooldown_seconds: float = field(default_factory=lambda: _env_float("DOTEYE_COOLDOWN_SECONDS", 30.0))
     jpeg_quality: int = field(default_factory=lambda: _env_int("DOTEYE_JPEG_QUALITY", 85))
+    privacy_outbound: bool = field(
+        default_factory=lambda: _env_bool("DOTEYE_PRIVACY_OUTBOUND", "1")
+    )
     events_limit: int = field(default_factory=lambda: _env_int("DOTEYE_EVENTS_LIMIT", 10))
     imgsz: int = field(default_factory=lambda: _env_int("DOTEYE_IMGSZ", 640))
     track_max_misses: int = field(default_factory=lambda: _env_int("DOTEYE_TRACK_MAX_MISSES", 3))

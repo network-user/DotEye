@@ -158,6 +158,14 @@ def test_clear_on_known_keeps_alarm_after_exit(tmp_path: Path) -> None:
     assert engine.alarming is True
 
 
+def test_manual_alarm_while_disarmed_stays(tmp_path: Path) -> None:
+    engine, _tts, _player, _rt = _engine(tmp_path, armed=False)
+    engine.trigger_alarm("Отойди!")
+    assert engine.alarming
+    engine.observe(VoiceScene(armed=False, identity=True, quiet=False))
+    assert engine.alarming is True
+
+
 def test_manual_announce_and_dismiss(tmp_path: Path) -> None:
     engine, tts, _player, _rt = _engine(tmp_path)
     assert engine.announce("Отойди от двери!")

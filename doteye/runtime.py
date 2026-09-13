@@ -211,6 +211,15 @@ class Runtime:
         self._storage.set("notify_exit", "1" if value else "0")
 
     @property
+    def privacy_outbound(self) -> bool:
+        """Отправлять в Telegram только обезличенные кадры."""
+        return self._get_bool("privacy_outbound", self._settings.privacy_outbound)
+
+    @privacy_outbound.setter
+    def privacy_outbound(self, value: bool) -> None:
+        self._storage.set("privacy_outbound", "1" if value else "0")
+
+    @property
     def remote_processing(self) -> bool:
         enabled = self._get_bool("remote_processing", self._settings.remote_processing)
         return enabled and bool(self.remote_url)

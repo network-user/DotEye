@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 
-from doteye.annotate import annotate, crop_box, encode_jpeg
+from doteye.annotate import annotate, crop_box, encode_jpeg, redact_frame
 from doteye.camera import CameraSource, build_cameras, parse_sources
 from doteye.crypto import Crypto
 from doteye.detector import Detector, MotionGate, build_detector
@@ -302,7 +302,9 @@ class Pipeline:
         color = (40, 200, 80) if track.person_name else (40, 40, 220)
         if event_type == "exit":
             color = (160, 160, 160)
-        vis = annotate(frame, [(track.box, label, color)])
+        vis = redact_frame(frame, [track.box]) if self._runtime.privacy_outbound else annotate(
+            frame, [(track.box, label, color)]
+        )
         jpeg = encode_jpeg(vis, self._runtime.jpeg_quality)
         original = encode_jpeg(frame, self._runtime.jpeg_quality)
         if jpeg is None or original is None:
@@ -322,7 +324,10 @@ class Pipeline:
             event_type=event_type, boxes=boxes_json,
             camera_source=source, zone=track.zone,
         )
-        caption = f"DotEye: {verb} {who}{conf}\nкамера {source}{zone}"
+        if self._runtime.privacy_outbound:
+            caption = "DotEye: обнаружен человек"
+        else:
+            caption = f"DotEye: {verb} {who}{conf}\nкамера {source}{zone}"
         return DetectionEvent(
             track.person_name, track.confidence, jpeg, now,
             event_id=event_id, event_type=event_type,
@@ -485,7 +490,10 @@ class Pipeline:
             items = list(self._preview_items)
         if frame is None:
             return None
-        vis = annotate(frame, items) if items else frame
+        if self._runtime.privacy_outbound:
+            vis = redact_frame(frame, [box for box, _label, _color in items])
+        else:
+            vis = annotate(frame, items) if items else frame
         return encode_jpeg(vis, self._runtime.jpeg_quality)
 
     def health_text(self) -> str:

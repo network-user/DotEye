@@ -49,6 +49,36 @@ def annotate(
     return vis
 
 
+def redact_frame(frame: np.ndarray, boxes: list[Box], blocks: int = 12) -> np.ndarray:
+    """Скрыть окружение и грубо пикселизировать обнаруженные объекты.
+
+    В результирующем кадре остаются только пикселизированные силуэты внутри
+    боксов. Это безопаснее размытия: ни лицо, ни детали помещения не попадают
+    в Telegram даже при доступе к истории чата.
+    """
+    if frame.size == 0:
+        return frame.copy()
+    if blocks < 2:
+        raise ValueError("blocks должен быть не меньше 2")
+    height, width = frame.shape[:2]
+    # Однотонный фон не сохраняет контуры, предметы и текст из помещения.
+    result = np.full_like(frame, (20, 20, 20))
+    for raw_box in boxes:
+        x1, y1, x2, y2 = (int(value) for value in raw_box)
+        x1, x2 = sorted((max(0, min(width, x1)), max(0, min(width, x2))))
+        y1, y2 = sorted((max(0, min(height, y1)), max(0, min(height, y2))))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        crop = frame[y1:y2, x1:x2]
+        small_width = min(blocks, crop.shape[1])
+        small_height = min(blocks, crop.shape[0])
+        miniature = cv2.resize(crop, (small_width, small_height), interpolation=cv2.INTER_AREA)
+        result[y1:y2, x1:x2] = cv2.resize(
+            miniature, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST,
+        )
+    return result
+
+
 def encode_jpeg(frame: np.ndarray, quality: int) -> bytes | None:
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
     return buf.tobytes() if ok else None

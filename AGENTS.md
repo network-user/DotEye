@@ -94,6 +94,7 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_MIN_CONFIDENCE` | порог детекции 0..1 |
 | `DOTEYE_COOLDOWN_SECONDS` | пауза повторного входа, сек |
 | `DOTEYE_JPEG_QUALITY` | качество JPEG для кадров событий |
+| `DOTEYE_PRIVACY_OUTBOUND` | `1` = в Telegram отправляются только пикселизированные люди на скрытом фоне |
 | `DOTEYE_EVENTS_LIMIT` | сколько событий показывает `/events` |
 | `DOTEYE_FACE_THRESHOLD` | порог дистанции embedding (identity) |
 | `DOTEYE_ARMED` | `1` = охрана включена |

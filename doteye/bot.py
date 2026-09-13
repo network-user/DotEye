@@ -12,6 +12,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+import cv2
+import numpy as np
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -27,7 +29,7 @@ from aiogram.types import (
 )
 
 from doteye import models
-from doteye.annotate import crop_box
+from doteye.annotate import crop_box, encode_jpeg, redact_frame
 from doteye.config import ConfigurationError, Settings
 from doteye.crypto import Crypto
 from doteye.pipeline import Pipeline
@@ -186,6 +188,7 @@ def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> Inlin
     arm = _on(runtime.armed)
     quiet = runtime.quiet_hours or "выкл"
     exit_s = _on(runtime.notify_exit)
+    privacy = _on(runtime.privacy_outbound)
     remote = _on(runtime.remote_processing)
     if voice is not None and voice.alarming:
         voice_s = "ТРЕВОГА"
@@ -244,6 +247,11 @@ def _panel_keyboard(runtime: Runtime, voice: VoiceEngine | None = None) -> Inlin
         [
             InlineKeyboardButton(text=f"Тихие: {quiet}", callback_data="panel:quiet"),
             InlineKeyboardButton(text=f"Выход: {exit_s}", callback_data="panel:exit"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Приватные кадры: {privacy}", callback_data="panel:privacy"
+            ),
         ],
         [
             InlineKeyboardButton(text="Зоны", callback_data="panel:zones"),
@@ -529,6 +537,7 @@ def _status_text(runtime: Runtime, recognizer: Recognizer | None,
         f"Распознавание: {face_s}",
         f"Remote: {remote} ({runtime.remote_url or 'нет URL'})",
         f"Уведомлять выход: {'да' if runtime.notify_exit else 'нет'}",
+        f"Приватные кадры: {'да' if runtime.privacy_outbound else 'нет'}",
         f"Голос: {_on(runtime.voice_enabled)}, тревога {_on(runtime.voice_alarm_enabled)}",
         f"Сирена: {_on(runtime.voice_siren_enabled)}, речь {_on(runtime.voice_speech_enabled)}",
         f"Привет/пока: {_on(runtime.voice_welcome)}/{_on(runtime.voice_goodbye)}",
@@ -554,6 +563,23 @@ def _event_box(row: Any) -> tuple[int, int, int, int] | None:
         return int(item["x1"]), int(item["y1"]), int(item["x2"]), int(item["y2"])
     except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
         return None
+
+
+def _event_boxes(row: Any) -> list[tuple[int, int, int, int]]:
+    """Извлечь валидные боксы события, не доверяя данным старой БД."""
+    try:
+        values = json.loads(row["boxes"] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    result: list[tuple[int, int, int, int]] = []
+    for value in values if isinstance(values, list) else []:
+        if not isinstance(value, dict):
+            continue
+        try:
+            result.append(tuple(int(value[key]) for key in ("x1", "y1", "x2", "y2")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return result
 
 
 def _embed_jpeg(
@@ -623,7 +649,10 @@ async def _send_events_page(
         conf = f", conf={row['confidence']:.2f}" if row["confidence"] else ""
         cam = f"\nкамера {row['camera_source']}" if row["camera_source"] else ""
         zone = f", зона {row['zone']}" if row["zone"] else ""
-        caption = f"{row['detected_at']}\n{verb} {who}{conf}{cam}{zone}"
+        if runtime.privacy_outbound:
+            caption = f"{row['detected_at']}\nобнаружен человек"
+        else:
+            caption = f"{row['detected_at']}\n{verb} {who}{conf}{cam}{zone}"
         markup = None
         if row["person_name"] is None and kind == "enter":
             markup = InlineKeyboardMarkup(inline_keyboard=[[
@@ -639,6 +668,15 @@ async def _send_events_page(
         except Exception:
             await message.answer(caption + "\n(кадр не расшифрован)")
             continue
+        if runtime.privacy_outbound:
+            frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                await message.answer(caption + "\n(кадр повреждён)", reply_markup=markup)
+                continue
+            jpeg = encode_jpeg(redact_frame(frame, _event_boxes(row)), runtime.jpeg_quality)
+            if jpeg is None:
+                await message.answer(caption + "\n(кадр не подготовлен)", reply_markup=markup)
+                continue
         await message.answer_photo(
             BufferedInputFile(jpeg, filename=f"event_{row['id']}.jpg"),
             caption=caption, reply_markup=markup,
@@ -733,6 +771,13 @@ async def cb_exit_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
     runtime.notify_exit = not runtime.notify_exit
     await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
     await cq.answer("Выход: " + ("вкл" if runtime.notify_exit else "выкл"))
+
+
+@router.callback_query(F.data == "panel:privacy")
+async def cb_privacy_toggle(cq: CallbackQuery, runtime: Runtime) -> None:
+    runtime.privacy_outbound = not runtime.privacy_outbound
+    await cq.message.edit_text("Админ-панель DotEye:", reply_markup=_panel_keyboard(runtime))
+    await cq.answer("Приватные кадры: " + ("вкл" if runtime.privacy_outbound else "выкл"))
 
 
 @router.callback_query(F.data == "panel:mode")
