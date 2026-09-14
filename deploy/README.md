@@ -59,6 +59,8 @@ python -m doteye.remote_server --host 0.0.0.0 --port 8099 \
 DOTEYE_REMOTE_PROCESSING=1
 DOTEYE_REMOTE_URL=https://<remote-host>
 DOTEYE_ALLOWED_URL_HOSTS=<remote-host>
+# Нужен только для self-signed TLS по IP: путь к доверенному PEM-файлу.
+DOTEYE_REMOTE_CA_CERT=/абсолютный/путь/server.crt
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```
 
@@ -90,10 +92,10 @@ python deploy/deploy_remote.py
 - Compose поднимет два сервиса: `remote` (инференс) + `caddy` (TLS-терминатор, порты 80/443)
 
 **2. По IP-АДРЕСУ**
-- HTTPS через ngrok или самоподписанный сертификат
-- Без автоматического TLS
-- Подходит для временного развёртывания или без домена
-- Скрипт даст инструкции по настройке HTTPS (ngrok или openssl)
+- Самоподписанный TLS с IP в SAN; DotEye проверяет явно переданный PEM-файл
+- Нет автоматического выпуска и продления сертификата
+- Временный вариант: для постоянного публичного сервиса предпочтителен домен
+- Скрипт генерирует готовый Compose и выводит команду `openssl`
 
 Скрипт также спросит:
 - `DOTEYE_CRYPTO_KEY` — пусто = сгенерирует; ключ обязан совпасть с машиной камеры;
@@ -110,14 +112,17 @@ curl https://<домен>/health    # {"status": "ok"}
 
 ```
 DOTEYE_REMOTE_PROCESSING=1
-DOTEYE_REMOTE_URL=https://<домен-или-ngrok-адрес>
-DOTEYE_ALLOWED_URL_HOSTS=<домен-или-ngrok-хост>
+DOTEYE_REMOTE_URL=https://<домен-или-IP>:<порт>
+DOTEYE_ALLOWED_URL_HOSTS=<домен-или-IP>
+# Только для IP с self-signed TLS: абсолютный путь к скопированному server.crt.
+DOTEYE_REMOTE_CA_CERT=/абсолютный/путь/server.crt
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```
 
-Для IP-варианта используй ngrok (`ngrok http 8099` даст `https://xxxx.ngrok-free.app`)
-или самоподписанный сертификат (инструкции в выводе скрипта).
-Не выставляй plain HTTP-порт remote в интернет.
+Для IP-варианта генератор создаёт Compose с TLS. Выпусти сертификат командой из
+его вывода, скопируй с VPS только `server.crt` на машину с камерой и укажи путь
+к нему в `DOTEYE_REMOTE_CA_CERT`. `server.key` остаётся только на VPS.
+Не выставляй plain HTTP-порт remote в интернет и не включай `DOTEYE_REMOTE_INSECURE`.
 
 ## 2. systemd (Linux, без Docker)
 

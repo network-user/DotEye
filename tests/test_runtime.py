@@ -89,6 +89,14 @@ def test_open_access_requires_development() -> None:
     assert Settings(environment="development", allow_open_access=True).allow_open_access
 
 
+def test_remote_ca_certificate_must_be_a_file(tmp_path: Path) -> None:
+    certificate = tmp_path / "remote.crt"
+    certificate.write_text("PEM", encoding="utf-8")
+    assert Settings(remote_ca_cert=str(certificate)).remote_ca_cert == str(certificate)
+    with pytest.raises(ConfigurationError, match="REMOTE_CA_CERT"):
+        Settings(remote_ca_cert=str(tmp_path / "missing.crt"))
+
+
 def test_network_sources_require_exact_allowlist() -> None:
     allowed = frozenset({"camera.local", "inference.local"})
     assert validate_camera_source(

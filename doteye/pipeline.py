@@ -83,6 +83,7 @@ class Pipeline:
         self._person_min_area = runtime.person_min_area
         self._remote = runtime.remote_processing
         self._remote_url = runtime.remote_url
+        self._remote_ca_cert = runtime.remote_ca_cert
         self._mode_seen = runtime.detect_mode
         self._recognizer_device = runtime.device
         self._recognizer_tried = recognizer is not None
@@ -188,6 +189,7 @@ class Pipeline:
             imgsz=self._imgsz,
             remote_fallback=self._runtime.remote_fallback,
             remote_insecure=self._runtime.remote_insecure,
+            remote_ca_cert=self._runtime.remote_ca_cert,
             nms_iou=self._nms_iou,
             person_min_area=self._person_min_area,
         )
@@ -251,6 +253,7 @@ class Pipeline:
         person_min_area = self._runtime.person_min_area
         remote = self._runtime.remote_processing
         remote_url = self._runtime.remote_url
+        remote_ca_cert = self._runtime.remote_ca_cert
         if (
             backend == self._detector_backend
             and model_path == self._model_path
@@ -261,6 +264,7 @@ class Pipeline:
             and person_min_area == self._person_min_area
             and remote == self._remote
             and remote_url == self._remote_url
+            and remote_ca_cert == self._remote_ca_cert
         ):
             return
         print(
@@ -274,6 +278,7 @@ class Pipeline:
             imgsz=imgsz,
             remote_fallback=self._runtime.remote_fallback,
             remote_insecure=self._runtime.remote_insecure,
+            remote_ca_cert=remote_ca_cert,
             nms_iou=nms_iou,
             person_min_area=person_min_area,
         )
@@ -286,6 +291,7 @@ class Pipeline:
         self._person_min_area = person_min_area
         self._remote = remote
         self._remote_url = remote_url
+        self._remote_ca_cert = remote_ca_cert
         old.close()
         self._close_parallel()
 

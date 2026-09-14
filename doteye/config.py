@@ -211,6 +211,7 @@ class Settings:
     remote_url: str = field(default_factory=lambda: os.getenv("DOTEYE_REMOTE_URL", ""))
     remote_fallback: bool = field(default_factory=lambda: _env_bool("DOTEYE_REMOTE_FALLBACK", "1"))
     remote_insecure: bool = field(default_factory=lambda: _env_bool("DOTEYE_REMOTE_INSECURE", "0"))
+    remote_ca_cert: str = field(default_factory=lambda: os.getenv("DOTEYE_REMOTE_CA_CERT", ""))
 
     # Модели и данные
     model_path: str = field(default_factory=lambda: os.getenv("DOTEYE_MODEL_PATH", "yolov8n.pt"))
@@ -370,6 +371,8 @@ class Settings:
             raise ConfigurationError("DOTEYE_REMOTE_PROCESSING требует DOTEYE_REMOTE_URL")
         if self.remote_insecure and self.environment not in _DEVELOPMENT_ENVIRONMENTS:
             raise ConfigurationError("DOTEYE_REMOTE_INSECURE разрешён только при DOTEYE_ENV=development")
+        if self.remote_ca_cert and not Path(self.remote_ca_cert).is_file():
+            raise ConfigurationError("DOTEYE_REMOTE_CA_CERT должен указывать на PEM-файл сертификата")
 
     @property
     def has_token(self) -> bool:

@@ -508,6 +508,11 @@ class Runtime:
         return self._get_bool("remote_insecure", self._settings.remote_insecure)
 
     @property
+    def remote_ca_cert(self) -> str:
+        """PEM сертификат, которому доверяет клиент remote-инференса."""
+        return self._settings.remote_ca_cert
+
+    @property
     def imgsz(self) -> int:
         value = self._get_int("imgsz", self._settings.imgsz)
         return value if 160 <= value <= 4096 else self._settings.imgsz

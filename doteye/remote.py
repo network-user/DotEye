@@ -144,11 +144,13 @@ class RemoteClient:
 
     def __init__(
         self, url: str, crypto: Crypto, timeout: float = 10.0, insecure: bool = False,
+        ca_cert: str = "",
     ) -> None:
         self._url = url.rstrip("/")
         self._crypto = crypto
         self._timeout = timeout
         self._insecure = insecure
+        self._ca_cert = ca_cert
         self._worker_id = secrets.token_hex(8)
         parsed = urlparse(self._url if "://" in self._url else "http://" + self._url)
         self._scheme = parsed.scheme.lower() or "http"
@@ -164,7 +166,11 @@ class RemoteClient:
 
     def _connect(self) -> http.client.HTTPConnection:
         if self._scheme == "https":
-            context = ssl._create_unverified_context() if self._insecure else ssl.create_default_context()
+            context = (
+                ssl._create_unverified_context()
+                if self._insecure
+                else ssl.create_default_context(cafile=self._ca_cert or None)
+            )
             return http.client.HTTPSConnection(self._host, self._port, timeout=self._timeout, context=context)
         return http.client.HTTPConnection(self._host, self._port, timeout=self._timeout)
 

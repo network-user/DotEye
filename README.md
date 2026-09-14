@@ -138,7 +138,7 @@ python bench.py --backend yolo --model yolov8n.pt
 
 Камера и инференс могут жить на разных машинах: кадр шифруется AES-256-GCM и уходит POST-ом, каждый запрос подписан HMAC-SHA256 (метод/путь/время/nonce/тело) - защита от подделки и replay. HTTPS берётся из URL. Если сервер недоступен, клиент уходит на локальный детектор (если включён fallback) и шлёт алерт в чат.
 
-VPN не обязателен: `RemoteClient` работает через `https://` с проверкой сертификата. Автодеплой remote-сервера на VPS - `python deploy/deploy_remote.py` (спрашивает домен/IP/ngrok, генерит `.env.remote` и `docker-compose.remote.yml` с Caddy для auto-TLS). Подробности - [deploy/README.md](deploy/README.md).
+VPN не обязателен: `RemoteClient` работает через `https://` с проверкой сертификата. Автодеплой remote-сервера на VPS - `python deploy/deploy_remote.py`: для домена генерируется Compose с Caddy и автоматическим TLS, для IP - Compose с self-signed TLS и доверенным PEM-сертификатом на клиенте. Подробности - [deploy/README.md](deploy/README.md).
 
 На сервере (вручную, без Docker):
 
@@ -157,6 +157,7 @@ curl http://localhost:8099/health    # {"status": "ok"}
 DOTEYE_REMOTE_PROCESSING=1
 DOTEYE_REMOTE_URL=https://<remote-host>
 DOTEYE_ALLOWED_URL_HOSTS=<remote-host>
+DOTEYE_REMOTE_CA_CERT=/путь/к/server.crt  # только для self-signed TLS по IP
 DOTEYE_REMOTE_FALLBACK=1
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```

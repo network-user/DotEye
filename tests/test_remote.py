@@ -108,6 +108,22 @@ def test_client_rejects_unencrypted_remote_url(crypto: Crypto) -> None:
         RemoteClient("http://192.0.2.1:8099", crypto)
 
 
+def test_client_uses_supplied_ca_certificate(crypto: Crypto, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str | None] = {}
+
+    def create_context(*, cafile: str | None = None):
+        captured["cafile"] = cafile
+        import ssl
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    monkeypatch.setattr("doteye.remote.ssl.create_default_context", create_context)
+    client = RemoteClient(
+        "https://192.0.2.1:8099", crypto, ca_cert="C:/certs/doteye-remote.crt",
+    )
+    client._connect()
+    assert captured["cafile"] == "C:/certs/doteye-remote.crt"
+
+
 def test_client_rejects_invalid_boxes(crypto: Crypto) -> None:
     server = RemoteServer("127.0.0.1", 0, lambda _frame: [(4, 4, 2, 2)], crypto)
     port = server._server.server_address[1]

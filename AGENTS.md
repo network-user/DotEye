@@ -112,6 +112,7 @@ docs/cover.svg     обложка DotBioSite
 | `DOTEYE_ZONES` | JSON зон кадра |
 | `DOTEYE_REMOTE_PROCESSING` | `1` = вынос инференса на сервер |
 | `DOTEYE_REMOTE_URL` | HTTPS-адрес remote-сервера; HTTP допустим только для loopback/development |
+| `DOTEYE_REMOTE_CA_CERT` | PEM-файл, которому доверяет remote-клиент при self-signed TLS по IP |
 | `DOTEYE_REMOTE_FALLBACK` | `1` = локальный детектор при падении remote |
 | `DOTEYE_REMOTE_INSECURE` | `1` = не проверять TLS remote, только при `DOTEYE_ENV=development` |
 | `DOTEYE_CRYPTO_KEY` | base64 32 байта для AES-GCM |

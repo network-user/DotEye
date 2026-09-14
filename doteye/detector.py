@@ -251,6 +251,7 @@ class RemoteDetector(Detector):
         timeout: float = 10.0,
         fallback: Detector | None = None,
         insecure: bool = False,
+        ca_cert: str = "",
     ) -> None:
         from doteye.remote import RemoteClient
 
@@ -260,7 +261,7 @@ class RemoteDetector(Detector):
         self.using_fallback = False
         self.last_error: str | None = None
         self._client = (
-            RemoteClient(remote_url, crypto, timeout, insecure=insecure)
+            RemoteClient(remote_url, crypto, timeout, insecure=insecure, ca_cert=ca_cert)
             if crypto and remote_url
             else None
         )
@@ -341,6 +342,7 @@ def build_detector(kind: str, model_path: str, device: str, min_conf: float,
                    crypto: "Crypto | None" = None, imgsz: int = 640,
                    remote_fallback: bool = False,
                    remote_insecure: bool = False,
+                   remote_ca_cert: str = "",
                    nms_iou: float = 0.6,
                    person_min_area: float = 0.004) -> Detector:
     """Собрать детектор. kind: auto | yolo | yunet | motion.
@@ -360,6 +362,7 @@ def build_detector(kind: str, model_path: str, device: str, min_conf: float,
                 return fallback
         return RemoteDetector(
             remote_url, crypto, fallback=fallback, insecure=remote_insecure,
+            ca_cert=remote_ca_cert,
         )
 
     return _build_local(kind, model_path, device, min_conf, face_model, imgsz,

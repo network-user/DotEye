@@ -2,7 +2,7 @@
 
 Предлагает выбор типа развёртывания:
   1. По домену - автоматический HTTPS через Let's Encrypt (Caddy)
-  2. По IP-адресу - HTTPS через ngrok или самоподписанный сертификат
+  2. По IP-адресу - HTTPS с самоподписанным сертификатом и явным доверием клиента
 
 Генерирует .env.remote + docker-compose.remote.yml с автоматической настройкой
 под выбранный тип. После этого деплой - одна команда:
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
 import sys
 from pathlib import Path
@@ -74,11 +75,19 @@ def write_env(domain: str, key: str, model: str, device: str, ip_address: str = 
     ENV_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_compose(caddy: bool) -> None:
+def write_compose(
+    caddy: bool, direct_ip: bool = False, model: str = "yolov8n.pt", device: str = "cpu",
+) -> None:
     """Собственный compose рядом со скриптом (тот же каталог deploy/)."""
     # Только одна схема: environment + env_file не комбинируются у `remote`,
     # поэтому ключ/модель/устройство всегда тянутся из .env.remote.
     ports = '    expose:\n      - "8099"\n' if caddy else '    ports:\n      - "8099:8099"\n'
+    tls = (
+        '        "--tls-cert", "/run/tls/server.crt",\n'
+        '        "--tls-key", "/run/tls/server.key",\n'
+        if direct_ip else ""
+    )
+    tls_volume = "    volumes:\n      - ./tls:/run/tls:ro\n" if direct_ip else ""
 
     remote = (
         "services:\n"
@@ -95,14 +104,15 @@ def write_compose(caddy: bool) -> None:
         + "      [\n"
         + '        "python", "-m", "doteye.remote_server",\n'
         + '        "--host", "0.0.0.0", "--port", "8099",\n'
-        + '        "--model", "${DOTEYE_MODEL_PATH:-yolov8n.pt}",\n'
-        + '        "--device", "${DOTEYE_DEVICE:-cpu}",\n'
+        + tls
+        + f'        "--model", "{model}", "--device", "{device}",\n'
         + "      ]\n"
         + "    read_only: true\n"
         + "    tmpfs:\n"
         + "      - /tmp\n"
         + "    security_opt:\n"
         + "      - no-new-privileges:true\n"
+        + tls_volume
     )
 
     caddy_svc = ""
@@ -150,9 +160,9 @@ def main() -> None:
     print("   • Caddy настроит TLS сертификат сам")
     print("   • Требуется: доменное имя, указывающее на сервер")
     print("\n2. По IP-АДРЕСУ")
-    print("   • HTTPS через ngrok или самоподписанный сертификат")
-    print("   • Без автоматического TLS")
-    print("   • Подходит для временного развёртывания или без домена")
+    print("   • Самоподписанный TLS: клиент доверяет только сохранённому PEM-файлу")
+    print("   • Без автоматического выпуска и продления сертификата")
+    print("   • Временный вариант: для постоянного сервера лучше домен")
     
     while True:
         mode = ask("\nВыбери тип (1 - домен / 2 - IP)", "1")
@@ -177,16 +187,22 @@ def main() -> None:
         print("\n" + "-" * 70)
         print("Настройка развёртывания по IP-адресу")
         print("-" * 70)
-        ip_address = ask("IP-адрес сервера (для справки, можно оставить пустым)", "")
+        while True:
+            ip_address = ask("Публичный IPv4-адрес сервера")
+            try:
+                ipaddress.IPv4Address(ip_address)
+            except ipaddress.AddressValueError:
+                print("Нужен корректный IPv4-адрес, например 203.0.113.10.")
+                continue
+            break
         use_caddy = False
-        print("✓ Remote-сервер будет слушать localhost:8099")
-        print("✓ Для HTTPS используй ngrok или самоподписанный сертификат")
+        print("✓ Будет создан compose с TLS; перед запуском создай сертификат с IP в SAN.")
 
     device = ask("\nУстройство инференса (cpu/cuda)", "cpu")
     model = pick_model()
 
     write_env(domain, key, model, device, ip_address)
-    write_compose(use_caddy)
+    write_compose(use_caddy, direct_ip=not use_caddy, model=model, device=device)
 
     print("\n" + "=" * 70)
     print("Файлы готовы:")
@@ -205,26 +221,20 @@ def main() -> None:
     if use_caddy:
         print(f"  curl https://{domain}/health   # {'{'}\"status\": \"ok\"{'}'}")
     else:
-        print("  curl http://127.0.0.1:8099/health   # {" + '"status": "ok"' + "}")
+        print(f"  После выпуска TLS: curl --cacert deploy/tls/server.crt https://{ip_address}:8099/health")
 
     if not use_caddy:
         print("\n" + "=" * 70)
-        print("Настройка HTTPS (обязательно!):")
+        print("TLS для подключения по IP (обязательно до запуска):")
         print("=" * 70)
-        print("\nВариант 1: ngrok (проще)")
-        print("  На сервере запусти: ngrok http 8099")
-        print("  ngrok выдаст адрес: https://xxxx-xxx-xxx-xxx.ngrok-free.app")
-        print("  Этот адрес используй в DOTEYE_REMOTE_URL на машине с камерой")
-        print("\nВариант 2: самоподписанный TLS")
-        print("  1. Сгенерируй сертификат:")
-        print("     mkdir -p deploy/tls")
-        print("     openssl req -x509 -newkey rsa:4096 -nodes \\")
-        print("       -keyout deploy/tls/server.key \\")
-        print("       -out deploy/tls/server.crt \\")
-        print(f"       -days 365 -subj \"/CN={ip_address or '<IP-адрес>'}\"")
-        print("  2. Раскомментируй блок volumes и --tls-* в docker-compose.remote.yml")
-        print("  3. Измени порты на \"8099:8099\" в docker-compose.remote.yml")
-        print(f"  4. В DOTEYE_REMOTE_URL используй: https://{ip_address or '<IP-адрес>'}:8099")
+        print("  mkdir -p deploy/tls")
+        print(
+            "  openssl req -x509 -newkey rsa:4096 -sha256 -nodes -days 365 "
+            "-keyout deploy/tls/server.key -out deploy/tls/server.crt "
+            f"-subj \"/CN={ip_address}\" -addext \"subjectAltName = IP:{ip_address}\""
+        )
+        print("  docker compose -f deploy/docker-compose.remote.yml up -d --build")
+        print(f"  curl --cacert deploy/tls/server.crt https://{ip_address}:8099/health")
 
     print("\n" + "=" * 70)
     print("Настройка на машине с камерой (.env):")
@@ -234,8 +244,9 @@ def main() -> None:
         print(f"  DOTEYE_REMOTE_URL=https://{domain}")
         print(f"  DOTEYE_ALLOWED_URL_HOSTS={domain}")
     else:
-        print("  DOTEYE_REMOTE_URL=https://<ngrok-адрес или IP:8099>")
-        print("  DOTEYE_ALLOWED_URL_HOSTS=<хост из REMOTE_URL>")
+        print(f"  DOTEYE_REMOTE_URL=https://{ip_address}:8099")
+        print(f"  DOTEYE_ALLOWED_URL_HOSTS={ip_address}")
+        print("  DOTEYE_REMOTE_CA_CERT=<абсолютный путь к скопированному server.crt>")
     print(f"  DOTEYE_CRYPTO_KEY={key}")
 
     print("\n" + "=" * 70)

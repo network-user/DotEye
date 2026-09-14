@@ -85,6 +85,7 @@ async def main() -> None:
             imgsz=runtime.imgsz,
             remote_fallback=runtime.remote_fallback,
             remote_insecure=runtime.remote_insecure,
+            remote_ca_cert=runtime.remote_ca_cert,
         )
         pipeline = Pipeline(cameras, detector, recognizer, storage, crypto, runtime)
         pipeline.set_voice(voice)
