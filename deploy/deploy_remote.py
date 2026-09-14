@@ -75,6 +75,15 @@ def write_env(domain: str, key: str, model: str, device: str, ip_address: str = 
     ENV_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
+def prepare_model_cache() -> None:
+    """Подготовить writable-каталог для модели внутри read-only контейнера."""
+    cache = DEPLOY_DIR / "models"
+    cache.mkdir(exist_ok=True)
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        os.chown(cache, 1000, 1000)
+    cache.chmod(0o755)
+
+
 def write_compose(
     caddy: bool, direct_ip: bool = False, model: str = "yolov8n.pt", device: str = "cpu",
 ) -> None:
@@ -87,7 +96,9 @@ def write_compose(
         '        "--tls-key", "/run/tls/server.key",\n'
         if direct_ip else ""
     )
-    tls_volume = "    volumes:\n      - ./tls:/run/tls:ro\n" if direct_ip else ""
+    volumes = "    volumes:\n      - ./models:/models\n"
+    if direct_ip:
+        volumes += "      - ./tls:/run/tls:ro\n"
 
     remote = (
         "services:\n"
@@ -100,6 +111,8 @@ def write_compose(
         + "    env_file:\n      - .env.remote\n"
         + "    environment:\n"
         + "      DOTEYE_ENV: production\n"
+        + "      PYTHONPATH: /app\n"
+        + "    working_dir: /models\n"
         + "    command:\n"
         + "      [\n"
         + '        "python", "-m", "doteye.remote_server",\n'
@@ -112,7 +125,7 @@ def write_compose(
         + "      - /tmp\n"
         + "    security_opt:\n"
         + "      - no-new-privileges:true\n"
-        + tls_volume
+        + volumes
     )
 
     caddy_svc = ""
@@ -202,6 +215,7 @@ def main() -> None:
     model = pick_model()
 
     write_env(domain, key, model, device, ip_address)
+    prepare_model_cache()
     write_compose(use_caddy, direct_ip=not use_caddy, model=model, device=device)
 
     print("\n" + "=" * 70)
@@ -209,6 +223,7 @@ def main() -> None:
     print("=" * 70)
     print(f"  ✓ {ENV_PATH}")
     print(f"  ✓ {DEPLOY_DIR / 'docker-compose.remote.yml'}")
+    print(f"  ✓ {DEPLOY_DIR / 'models'} (кеш YOLO-модели)")
     if use_caddy:
         print(f"  ✓ {DEPLOY_DIR / 'Caddyfile'}")
 
@@ -233,6 +248,8 @@ def main() -> None:
             "-keyout deploy/tls/server.key -out deploy/tls/server.crt "
             f"-subj \"/CN={ip_address}\" -addext \"subjectAltName = IP:{ip_address}\""
         )
+        print("  chown root:1000 deploy/tls/server.key && chmod 640 deploy/tls/server.key")
+        print("  chmod 644 deploy/tls/server.crt")
         print("  docker compose -f deploy/docker-compose.remote.yml up -d --build")
         print(f"  curl --cacert deploy/tls/server.crt https://{ip_address}:8099/health")
 

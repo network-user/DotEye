@@ -24,4 +24,7 @@ def test_ip_compose_enables_tls_without_manual_edits(tmp_path: Path, monkeypatch
     assert '"--tls-cert", "/run/tls/server.crt"' in compose
     assert '"--tls-key", "/run/tls/server.key"' in compose
     assert "./tls:/run/tls:ro" in compose
+    assert "./models:/models" in compose
+    assert "working_dir: /models" in compose
+    assert "PYTHONPATH: /app" in compose
     assert '"--model", "yolov8s.pt", "--device", "cuda"' in compose
