@@ -1,0 +1,45 @@
+services:
+  remote:
+    build:
+      context: ..
+    image: doteye-remote:latest
+    restart: unless-stopped
+    expose:
+      - "8099"
+    env_file:
+      - .env.remote
+    environment:
+      DOTEYE_ENV: production
+    command:
+      [
+        "python", "-m", "doteye.remote_server",
+        "--host", "0.0.0.0", "--port", "8099",
+        "--model", "${DOTEYE_MODEL_PATH:-yolov8n.pt}",
+        "--device", "${DOTEYE_DEVICE:-cpu}",
+      ]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - remote
+    environment:
+      DOMAIN: ${DOTEYE_DOMAIN}
+    env_file:
+      - .env.remote
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

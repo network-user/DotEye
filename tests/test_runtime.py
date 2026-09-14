@@ -41,6 +41,16 @@ def test_parse_sources() -> None:
     assert parse_sources("  ") == ["0"]
 
 
+def test_settings_camera_names_are_padded_and_validated() -> None:
+    from doteye.config import ConfigurationError as CfgError
+    from doteye.config import Settings
+
+    settings = Settings(camera_source="0|1", camera_names=("Вход",))
+    assert settings.camera_names == ("Вход", "")
+    with pytest.raises(CfgError, match="DOTEYE_CAMERA_NAMES"):
+        Settings(camera_source="0", camera_names=("a", "b"))
+
+
 def test_runtime_voice_settings(tmp_path: Path) -> None:
     settings = Settings()
     st = Storage(tmp_path / "voice-rt.db")
@@ -131,4 +141,65 @@ def test_runtime_privacy_modes_keep_legacy_default(tmp_path: Path) -> None:
     assert rt.privacy_blocks == 6
     rt.privacy_mode = "off"
     assert rt.privacy_outbound is False
+    st.close()
+
+
+def test_runtime_camera_names_default_and_override(tmp_path: Path) -> None:
+    settings = Settings(camera_source="0|1", camera_names=("Вход", ""))
+    st = Storage(tmp_path / "names.db")
+    rt = Runtime(settings, st)
+    assert rt.camera_sources() == ["0", "1"]
+    assert rt.camera_names == ["Вход", ""]
+    assert rt.camera_label(0) == "Вход"
+    assert rt.camera_label(1) == "1"
+    rt.set_camera_name(1, "Склад")
+    assert rt.camera_names == ["Вход", "Склад"]
+    assert rt.camera_label(1) == "Склад"
+    rt.set_camera_name(1, "")
+    assert rt.camera_label(1) == "1"
+    st.close()
+
+
+def test_runtime_camera_rejects_long_name(tmp_path: Path) -> None:
+    settings = Settings(camera_source="0")
+    st = Storage(tmp_path / "long.db")
+    rt = Runtime(settings, st)
+    with pytest.raises(ConfigurationError, match="имя камеры"):
+        rt.set_camera_name(0, "x" * 41)
+    st.close()
+
+
+def test_runtime_camera_overrides(tmp_path: Path) -> None:
+    settings = Settings(camera_source="0|1", camera_parallel=False)
+    st = Storage(tmp_path / "ov.db")
+    rt = Runtime(settings, st)
+    assert rt.camera_parallel is False
+    assert rt.camera_cooldown(0) == settings.cooldown_seconds
+    assert rt.camera_enabled(0) is True
+    assert rt.camera_notify_exit(0) is settings.notify_exit
+
+    rt.set_camera_override(0, "cooldown_seconds", 5.0)
+    rt.set_camera_override(0, "enabled", False)
+    rt.set_camera_override(0, "notify_exit", True)
+    rt.set_camera_override(0, "detect_mode", "identity")
+    assert rt.camera_cooldown(0) == 5.0
+    assert rt.camera_enabled(0) is False
+    assert rt.camera_notify_exit(0) is True
+    assert rt.camera_detect_mode(0) == "identity"
+    assert rt.camera_cooldown(1) == settings.cooldown_seconds
+
+    rt.clear_camera_override(0, "cooldown_seconds")
+    assert rt.camera_cooldown(0) == settings.cooldown_seconds
+    with pytest.raises(ConfigurationError, match="неизвестная настройка"):
+        rt.set_camera_override(0, "bogus", 1)
+    st.close()
+
+
+def test_runtime_camera_override_ignores_corrupt_json(tmp_path: Path) -> None:
+    settings = Settings(camera_source="0")
+    st = Storage(tmp_path / "corrupt.db")
+    rt = Runtime(settings, st)
+    st.set("camera_overrides", "{not json")
+    assert rt.camera_override(0) == {}
+    assert rt.camera_cooldown(0) == settings.cooldown_seconds
     st.close()

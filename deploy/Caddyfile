@@ -1,0 +1,26 @@
+# Caddyfile - reverse proxy и авто-TLS для remote-инференса DotEye.
+#
+# DOMAIN подставляется из docker-compose.remote.yml (переменная DOTEYE_DOMAIN).
+# Caddy сам ставит и обновляет сертификат Let's Encrypt - VPN не нужен.
+
+{$DOMAIN} {
+	# Caddy выступает TLS-терминатором. Remote-сервер слушает plain HTTP
+	# внутри docker-сети (loopback), наружу уходит только HTTPS.
+	reverse_proxy remote:8099
+
+	# Лимит тела: кадр до ~1.5 МБ после base64, плюс JSON-обвязка.
+	request_body {
+		max_size 2MB
+	}
+
+	# Только inline-инференс; лишних методов не пропускаем.
+	@not_health not path /health /detect
+	handle @not_health {
+		respond 404
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

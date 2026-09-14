@@ -96,6 +96,57 @@ def test_camera_keyboard_lists_sources_and_hides_credentials(env) -> None:
     assert "user:password" not in bot._camera_source_text("rtsp://user:password@cam.local/live")
 
 
+def test_camera_keyboard_uses_custom_names(env) -> None:
+    env.runtime.camera_source = "0|1"
+    env.runtime.set_camera_name(0, "Вход")
+    kb = bot._camera_keyboard(env.runtime)
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("Вход" in label for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_cb_camera_toggle_and_reset(env) -> None:
+    env.runtime.camera_source = "0|1"
+    cq = FakeCallback("camera:tog:0:notify_enter")
+    await bot.cb_camera_toggle(cq, env.runtime)
+    assert env.runtime.camera_notify_enter(0) is False
+    cq = FakeCallback("camera:reset:0")
+    await bot.cb_camera_reset(cq, env.runtime)
+    assert env.runtime.camera_override(0) == {}
+
+
+@pytest.mark.asyncio
+async def test_cb_camera_mode_toggles(env) -> None:
+    env.runtime.camera_source = "0"
+    cq = FakeCallback("camera:mode:0")
+    await bot.cb_camera_mode(cq, env.runtime)
+    assert env.runtime.camera_detect_mode(0) == "identity"
+    await bot.cb_camera_mode(cq, env.runtime)
+    assert env.runtime.camera_detect_mode(0) == "presence"
+
+
+def test_camera_conf_text_shows_settings(env) -> None:
+    env.runtime.camera_source = "0"
+    rhs = bot._camera_conf_keyboard(0, env.runtime)
+    labels = [b.text for row in rhs.inline_keyboard for b in row]
+    assert any("Обработка" in label for label in labels)
+    assert any("Вход" in label for label in labels)
+    assert any("Режим" in label for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_camera_rename_flow(env) -> None:
+    env.runtime.camera_source = "0"
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    state = FSMContext(storage=MemoryStorage(), key=bot.CameraForm.name)
+    cq = FakeCallback("camera:rename:0")
+    await bot.cb_camera_rename(cq, state, env.runtime)
+    await bot.proc_camera_name(FakeMessage("Крыльцо"), state, env.runtime)
+    assert env.runtime.camera_label(0) == "Крыльцо"
+
+
 @pytest.mark.asyncio
 async def test_camera_view_and_test_snapshot(env) -> None:
     class Pipeline:

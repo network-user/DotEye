@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!deploy/.env.remote.example
 
 # Python
 __pycache__/
@@ -14,6 +15,13 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Ключи и сертификаты
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
 
 # Модели и данные приложения (кадры, БД, веса) - не коммитить
 data/

@@ -31,7 +31,8 @@ python -m doteye.main
 | Установка (dev + тесты) | `pip install -r requirements-dev.txt` |
 | Запуск | `python -m doteye.main` |
 | Remote-сервер | `python -m doteye.remote_server --host 127.0.0.1 --port 8099` |
-| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/remote_server.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py doteye/audio.py doteye/tts.py doteye/voice.py remote_server.py run.py bench.py` |
+| Remote автодеплой | `python deploy/deploy_remote.py` |
+| Компиляция (быстрая проверка) | `python -m py_compile doteye/main.py doteye/bot.py doteye/camera.py doteye/config.py doteye/crypto.py doteye/detector.py doteye/models.py doteye/pipeline.py doteye/recognizer.py doteye/remote.py doteye/remote_server.py doteye/runtime.py doteye/storage.py doteye/tracker.py doteye/zones.py doteye/annotate.py doteye/audio.py doteye/tts.py doteye/voice.py remote_server.py run.py bench.py deploy/deploy_remote.py` |
 | Тесты | `python -m pytest tests -q` |
 | Бенчмарк | `python bench.py` |
 | Docker | `docker compose up -d --build doteye` |
@@ -58,13 +59,13 @@ doteye/
 ├── audio.py       сирена WAV, плеер winsound/aplay/afplay
 ├── tts.py         pyttsx3 / espeak-ng / dummy
 ├── voice.py       тревога, фразы, ручная озвучка (отдельный поток)
-├── pipeline.py    цикл камера -> трек enter/exit -> событие, кэш кадра, prune
+├── pipeline.py    цикл камера -> трек enter/exit -> событие, параллельный инференс, prune
 └── storage.py     SQLite WAL: people, embeddings, events, settings, notification outbox
 tests/             pytest: crypto, storage, pipeline, detector, models, bot, remote, tracker, zones, audio, voice
 bench.py           бенчмарк детектора: FPS и время инференса
 remote_server.py   точка входа remote-сервера инференса
 run.py             альтернативная точка входа
-Dockerfile         образ; docker-compose.yml; deploy/ (systemd, инструкция)
+Dockerfile         образ; docker-compose.yml; deploy/ (systemd, remote-autodeploy, инструкция)
 docs/cover.svg     обложка DotBioSite
 ```
 

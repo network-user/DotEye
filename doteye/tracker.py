@@ -55,6 +55,9 @@ class IoUTracker:
     def active_count(self) -> int:
         return len(self._tracks)
 
+    def active_tracks(self) -> list[Track]:
+        return list(self._tracks.values())
+
     def update(self, boxes: list[Box]) -> TrackUpdate:
         pairs: list[tuple[float, int, int]] = []
         track_ids = list(self._tracks)

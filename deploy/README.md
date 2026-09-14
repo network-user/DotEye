@@ -31,13 +31,26 @@ GPU (NVIDIA): раскомментируй `deploy.resources` в `docker-compose
 
 ### Remote-инференс через Compose
 
-Remote-порт остаётся на loopback. Для камеры на другой машине используй VPN или TLS reverse proxy: прямой HTTP-порт не публикуй в сеть.
+Remote-порт остаётся на loopback. Для камеры на другой машине используй TLS reverse proxy: прямой HTTP-порт не публикуй в сеть.
 
-На сервере с GPU:
+На сервере с GPU положи `server.crt`/`server.key` в каталог `tls/` рядом с
+`docker-compose.yml`, затем:
 
 ```bash
 docker compose --profile remote up -d --build remote
-curl http://localhost:8099/health          # {"status": "ok"}
+curl -k https://localhost:8099/health     # {"status": "ok"}
+```
+
+Compose запускает сервер с `--tls-cert/--tls-key`; без сертификата контейнер
+не поднимется (plain HTTP вне loopback отвергается). Для локального режима
+без TLS убери `--tls-*` из `command` и оставь `--host 127.0.0.1`.
+
+Свой TLS без reverse proxy - передай сертификат самому серверу
+(plain HTTP вне loopback отклоняется):
+
+```bash
+python -m doteye.remote_server --host 0.0.0.0 --port 8099 \
+    --tls-cert server.crt --tls-key server.key --model yolov8n.pt --device cuda
 ```
 
 На машине с камерой в `.env`:
@@ -54,6 +67,53 @@ DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```bash
 python -m doteye.remote_server --host 127.0.0.1 --port 8099 --model yolov8n.pt --device cuda
 ```
+
+Для внешнего хоста добавь `--tls-cert server.crt --tls-key server.key`.
+
+### Автодеплой remote без VPN (домен или ngrok)
+
+Remote-инференс выносится на VPS, а камера и бот остаются дома. Кадры уходят
+по `https://` — VPN не обязателен, TLS берёт на себя Caddy (Let's Encrypt).
+
+Интерактивный генератор пишет `.env.remote` и `docker-compose.remote.yml`:
+
+```bash
+python deploy/deploy_remote.py
+```
+
+Скрипт спросит:
+
+- `DOTEYE_CRYPTO_KEY` — пусто = сгенерирует; ключ обязан совпасть с машиной камеры;
+- как сервер виден из интернета:
+  - `1` **свой домен** — Caddy сам поставит Let's Encrypt (рекомендуется);
+  - `2` **только IP** — поднимаешь TLS сам (`--tls-cert/--tls-key` через
+    `remote_server`, см. выше);
+  - `3` **ngrok** — без домена: на сервере `ngrok http 8099` даст
+    `https://xxxx.ngrok.io`, его ставишь в `DOTEYE_REMOTE_URL`.
+- устройство (`cpu`/`cuda`) и модель YOLO.
+
+Затем на сервере (в корне репозитория):
+
+```bash
+docker compose -f deploy/docker-compose.remote.yml up -d --build
+curl https://<домен>/health    # {"status": "ok"}
+```
+
+Compose поднимает два сервиса: `remote` (инференс, слушает только внутри
+docker-сети) и `caddy` (TLS-терминатор, порты 80/443 наружу). Кадры идут
+`POST https://<домен>/detect`, `--workers` задаёт параллельность инференса.
+
+На машине с камерой в `.env`:
+
+```
+DOTEYE_REMOTE_PROCESSING=1
+DOTEYE_REMOTE_URL=https://<домен-или-ngrok-адрес>
+DOTEYE_ALLOWED_URL_HOSTS=<домен-или-ngrok-хост>
+DOTEYE_CRYPTO_KEY=<тот же ключ>
+```
+
+ngrok-вариант: `DOTEYE_ALLOWED_URL_HOSTS` = хост `*.ngrok.io`-адреса,
+который выдал ngrok. Не выставляй plain HTTP-порт remote в интернет.
 
 ## 2. systemd (Linux, без Docker)
 
