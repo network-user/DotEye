@@ -6,37 +6,31 @@
       <stop offset="0.5" stop-color="#14161a"/>
       <stop offset="1" stop-color="#0b0c0e"/>
     </linearGradient>
-    <radialGradient id="de-glow" cx="70%" cy="20%" r="62%">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.04"/>
+    <radialGradient id="de-glow" cx="72%" cy="50%" r="48%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="0.7" stop-color="#ffffff" stop-opacity="0.03"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="de-halo" cx="50%" cy="50%" r="50%">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
   </defs>
   <rect width="1600" height="900" fill="url(#de-bg)"/>
   <rect width="1600" height="900" fill="url(#de-glow)"/>
   <g opacity="0.045" stroke="#ffffff" stroke-width="1">
-    <path d="M0 225 H1600 M0 450 H1600 M0 675 H1600 M400 0 V900 M800 0 V900 M1200 0 V900"/>
+    <path d="M0 180 H1600 M0 360 H1600 M0 540 H1600 M0 720 H1600 M320 0 V900 M640 0 V900 M960 0 V900 M1280 0 V900"/>
   </g>
-  <circle cx="1180" cy="460" r="330" fill="url(#de-halo)"/>
-  <svg x="965" y="245" width="430" height="430" viewBox="0 0 48 48">
-    <g opacity="0.1" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="24" cy="20" r="9"/>
-      <path d="M8 44 q16 -12 32 0"/>
-      <circle cx="24" cy="20" r="2" fill="#ffffff" stroke="none"/>
-    </g>
-  </svg>
-  <svg x="140" y="118" width="86" height="86" viewBox="0 0 48 48">
-    <g fill="none" stroke="#f3f3f1" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="24" cy="20" r="9"/>
-      <path d="M8 44 q16 -12 32 0"/>
-      <circle cx="24" cy="20" r="2" fill="#f3f3f1" stroke="none"/>
-    </g>
-  </svg>
-  <text x="138" y="408" font-family="Inter, Arial, sans-serif" font-size="132" font-weight="800" fill="#f3f3f1" letter-spacing="-3">.ядро</text>
-  <text x="146" y="470" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="700" fill="#f3f3f1">DotEye</text>
-  <text x="146" y="516" font-family="Inter, Arial, sans-serif" font-size="26" fill="#a6a7ab">кто зашёл в комнату - смотри Telegram</text>
+  
+  <!-- Камера-глаз справа -->
+  <circle cx="1140" cy="450" r="140" fill="url(#de-halo)"/>
+  <g fill="none" stroke="#f3f3f1" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="1140" cy="450" rx="95" ry="70"/>
+    <circle cx="1140" cy="450" r="38"/>
+    <circle cx="1140" cy="450" r="18" fill="#f3f3f1"/>
+  </g>
+  
+  <!-- Текст -->
+  <text x="140" y="420" font-family="Inter, Arial, sans-serif" font-size="110" font-weight="800" fill="#f3f3f1" letter-spacing="-2">DotEye</text>
+  <text x="146" y="480" font-family="Inter, Arial, sans-serif" font-size="28" fill="#a6a7ab">видеонаблюдение и охрана</text>
 </svg>
