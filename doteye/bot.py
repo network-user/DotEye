@@ -79,17 +79,6 @@ OUTBOX_MAX_RETRY_SECONDS = 3600
 TEST_SNAPSHOT_TTL_SECONDS = 60
 
 
-_MARKDOWN_ESCAPE_CHARS = set("_*[]()~`>#+-=|{}.!\\")
-
-
-def _escape_markdown(text: str) -> str:
-    """Экранировать спецсимволы legacy-Markdown для вставки произвольного текста."""
-    return "".join(
-        "\\" + char if char in _MARKDOWN_ESCAPE_CHARS else char
-        for char in text
-    )
-
-
 class CameraForm(StatesGroup):
     source = State()
     name = State()
@@ -1944,16 +1933,17 @@ async def cb_camera_test(cq: CallbackQuery, runtime: Runtime,
 @router.callback_query(F.data == "camera:edit")
 async def cb_camera_edit(cq: CallbackQuery, state: FSMContext, runtime: Runtime) -> None:
     await state.set_state(CameraForm.source)
+    # Без parse_mode: произвольный ввод пользователя смешивается со статическим
+    # текстом, а legacy-Markdown ломается на одиночном "_" в имени переменной.
     await cq.message.answer(
         "Настройка камер\n\n"
-        f"Текущий список: {_escape_markdown(runtime.camera_source)}\n\n"
+        f"Текущий список: {runtime.camera_source}\n\n"
         "Отправьте один источник или до четырёх через |.\n"
-        "• `0` - встроенная или USB-камера\n"
-        "• `rtsp://host/stream` - поток IP-камеры\n"
-        "• `http://host/video` - MJPEG-поток\n\n"
+        "• 0 - встроенная или USB-камера\n"
+        "• rtsp://host/stream - поток IP-камеры\n"
+        "• http://host/video - MJPEG-поток\n\n"
         "Для сетевой камеры её хост должен быть в DOTEYE_ALLOWED_URL_HOSTS. "
         "Нажмите «Инструкция», если не знаете адрес потока.",
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Инструкция", callback_data="camera:help")],
             [InlineKeyboardButton(text="Отмена", callback_data="camera:cancel")],

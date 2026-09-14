@@ -10,6 +10,7 @@ CameraSource - единый интерфейс над разными источ�
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -63,13 +64,30 @@ class OpenCVCamera(CameraSource):
             self._cap.release()
         # These properties are ignored by old OpenCV builds, but avoid an
         # indefinitely blocked RTSP open/read where the backend supports them.
-        self._cap = cv2.VideoCapture(self._source)
+        self._cap = self._create_capture()
         try:
             self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             self._cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5_000)
             self._cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5_000)
         except Exception:
             pass
+
+    def _create_capture(self) -> cv2.VideoCapture:
+        """Открыть источник, выбрав рабочий backend.
+
+        На Windows backend по умолчанию (MSMF) умеет открыть устройство, но
+        затем не отдаёт кадры на части USB/встроенных камер. DSHOW читает их
+        надёжнее, поэтому для локальных индексов пробуем его первым и
+        откатываемся на стандартное открытие, если кадра всё равно нет.
+        """
+        if isinstance(self._source, int) and sys.platform == "win32":
+            cap = cv2.VideoCapture(self._source, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    return cap
+            cap.release()
+        return cv2.VideoCapture(self._source)
 
     def read(self) -> np.ndarray | None:
         if self._cap is None or not self._cap.isOpened():

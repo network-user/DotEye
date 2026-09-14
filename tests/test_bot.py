@@ -148,6 +148,20 @@ async def test_camera_rename_flow(env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_camera_edit_sends_plain_text(env) -> None:
+    env.runtime.camera_source = "0"
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    state = FSMContext(storage=MemoryStorage(), key=bot.CameraForm.source)
+    cq = FakeCallback("camera:edit")
+    await bot.cb_camera_edit(cq, state, env.runtime)
+    text, kwargs = cq.message.sent[-1]
+    assert "parse_mode" not in kwargs
+    assert "0" in text
+
+
+@pytest.mark.asyncio
 async def test_camera_view_and_test_snapshot(env) -> None:
     class Pipeline:
         def camera_info(self, source: str):
