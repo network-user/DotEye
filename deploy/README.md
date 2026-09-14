@@ -70,10 +70,10 @@ python -m doteye.remote_server --host 127.0.0.1 --port 8099 --model yolov8n.pt -
 
 Для внешнего хоста добавь `--tls-cert server.crt --tls-key server.key`.
 
-### Автодеплой remote без VPN (домен или ngrok)
+### Автодеплой remote без VPN (домен или IP)
 
 Remote-инференс выносится на VPS, а камера и бот остаются дома. Кадры уходят
-по `https://` — VPN не обязателен, TLS берёт на себя Caddy (Let's Encrypt).
+по `https://` — VPN не обязателен.
 
 Интерактивный генератор пишет `.env.remote` и `docker-compose.remote.yml`:
 
@@ -81,15 +81,22 @@ Remote-инференс выносится на VPS, а камера и бот �
 python deploy/deploy_remote.py
 ```
 
-Скрипт спросит:
+Скрипт предложит выбрать тип развёртывания:
 
+**1. По ДОМЕНУ (рекомендуется)**
+- Автоматический HTTPS через Let's Encrypt
+- Caddy настроит TLS сертификат сам
+- Требуется: доменное имя, указывающее на сервер
+- Compose поднимет два сервиса: `remote` (инференс) + `caddy` (TLS-терминатор, порты 80/443)
+
+**2. По IP-АДРЕСУ**
+- HTTPS через ngrok или самоподписанный сертификат
+- Без автоматического TLS
+- Подходит для временного развёртывания или без домена
+- Скрипт даст инструкции по настройке HTTPS (ngrok или openssl)
+
+Скрипт также спросит:
 - `DOTEYE_CRYPTO_KEY` — пусто = сгенерирует; ключ обязан совпасть с машиной камеры;
-- как сервер виден из интернета:
-  - `1` **свой домен** — Caddy сам поставит Let's Encrypt (рекомендуется);
-  - `2` **только IP** — поднимаешь TLS сам (`--tls-cert/--tls-key` через
-    `remote_server`, см. выше);
-  - `3` **ngrok** — без домена: на сервере `ngrok http 8099` даст
-    `https://xxxx.ngrok.io`, его ставишь в `DOTEYE_REMOTE_URL`.
 - устройство (`cpu`/`cuda`) и модель YOLO.
 
 Затем на сервере (в корне репозитория):
@@ -98,10 +105,6 @@ python deploy/deploy_remote.py
 docker compose -f deploy/docker-compose.remote.yml up -d --build
 curl https://<домен>/health    # {"status": "ok"}
 ```
-
-Compose поднимает два сервиса: `remote` (инференс, слушает только внутри
-docker-сети) и `caddy` (TLS-терминатор, порты 80/443 наружу). Кадры идут
-`POST https://<домен>/detect`, `--workers` задаёт параллельность инференса.
 
 На машине с камерой в `.env`:
 
@@ -112,8 +115,9 @@ DOTEYE_ALLOWED_URL_HOSTS=<домен-или-ngrok-хост>
 DOTEYE_CRYPTO_KEY=<тот же ключ>
 ```
 
-ngrok-вариант: `DOTEYE_ALLOWED_URL_HOSTS` = хост `*.ngrok.io`-адреса,
-который выдал ngrok. Не выставляй plain HTTP-порт remote в интернет.
+Для IP-варианта используй ngrok (`ngrok http 8099` даст `https://xxxx.ngrok-free.app`)
+или самоподписанный сертификат (инструкции в выводе скрипта).
+Не выставляй plain HTTP-порт remote в интернет.
 
 ## 2. systemd (Linux, без Docker)
 

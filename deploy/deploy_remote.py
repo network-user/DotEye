@@ -1,7 +1,11 @@
 """Интерактивный генератор конфигов remote-инференса DotEye.
 
-Спрашивает, как remote-сервер доступен из интернета (свой домен / IP / ngrok),
-и пишет .env + docker-compose.remote.yml. После этого деплой - одна команда:
+Предлагает выбор типа развёртывания:
+  1. По домену - автоматический HTTPS через Let's Encrypt (Caddy)
+  2. По IP-адресу - HTTPS через ngrok или самоподписанный сертификат
+
+Генерирует .env.remote + docker-compose.remote.yml с автоматической настройкой
+под выбранный тип. После этого деплой - одна команда:
 
     docker compose -f deploy/docker-compose.remote.yml up -d --build
 
@@ -52,16 +56,21 @@ def pick_model() -> str:
         print("Номер вне диапазона.")
 
 
-def write_env(domain: str, key: str, model: str, device: str) -> None:
+def write_env(domain: str, key: str, model: str, device: str, ip_address: str = "") -> None:
     lines = [
         "# DotEye remote - сгенерировано deploy_remote.py. Не коммить этот файл.",
         "",
-        f"DOTEYE_DOMAIN={domain}",
+    ]
+    if domain:
+        lines.append(f"DOTEYE_DOMAIN={domain}")
+    if ip_address:
+        lines.append(f"# IP-адрес сервера: {ip_address}")
+    lines.extend([
         f"DOTEYE_CRYPTO_KEY={key}",
         f"DOTEYE_MODEL_PATH={model}",
         f"DOTEYE_DEVICE={device}",
         "",
-    ]
+    ])
     ENV_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -124,62 +133,115 @@ def write_compose(caddy: bool) -> None:
 
 
 def main() -> None:
-    print("DotEye remote deploy - генератор конфигурации\n")
+    print("=" * 70)
+    print("DotEye Remote Deploy - генератор конфигурации")
+    print("=" * 70)
 
-    key = ask("DOTEYE_CRYPTO_KEY (пусто = сгенерировать)").strip()
+    key = ask("\nDOTEYE_CRYPTO_KEY (пусто = сгенерировать)").strip()
     if not key:
         key = base64.b64encode(os.urandom(32)).decode()
+        print(f"✓ Сгенерирован новый ключ")
 
-    print("\nКак remote-сервер виден из интернета?")
-    print("  1. Свой домен (Caddy поставит Let's Encrypt - рекомендую)")
-    print("  2. Только IP (ngrok даст https-адрес, либо подними TLS сам)")
-    print("  3. ngrok (домен сейчас не нужен)")
+    print("\n" + "=" * 70)
+    print("Выбери тип развёртывания:")
+    print("=" * 70)
+    print("\n1. По ДОМЕНУ (рекомендуется)")
+    print("   • Автоматический HTTPS через Let's Encrypt")
+    print("   • Caddy настроит TLS сертификат сам")
+    print("   • Требуется: доменное имя, указывающее на сервер")
+    print("\n2. По IP-АДРЕСУ")
+    print("   • HTTPS через ngrok или самоподписанный сертификат")
+    print("   • Без автоматического TLS")
+    print("   • Подходит для временного развёртывания или без домена")
+    
     while True:
-        mode = ask("Режим", "1")
-        if mode in {"1", "2", "3"}:
+        mode = ask("\nВыбери тип (1 - домен / 2 - IP)", "1")
+        if mode in {"1", "2"}:
             break
-        print("Введи 1, 2 или 3.")
+        print("Введи 1 или 2.")
 
     domain = ""
-    caddy = False
+    use_caddy = False
+    ip_address = ""
+    
     if mode == "1":
-        # домен + Caddy auto-TLS
-        domain = ask("Доменное имя", "eye.example.com")
-        caddy = True
-    elif mode == "2":
-        domain = ask("Домен (можно оставить пустым)")
-        caddy = False
+        # Развёртывание по домену + Caddy auto-TLS
+        print("\n" + "-" * 70)
+        print("Настройка развёртывания по домену")
+        print("-" * 70)
+        domain = ask("Доменное имя (например, eye.example.com)", "eye.example.com")
+        use_caddy = True
+        print("✓ Caddy автоматически получит Let's Encrypt сертификат")
     else:
-        # ngrok
-        caddy = False
-        domain = ""
+        # Развёртывание по IP-адресу
+        print("\n" + "-" * 70)
+        print("Настройка развёртывания по IP-адресу")
+        print("-" * 70)
+        ip_address = ask("IP-адрес сервера (для справки, можно оставить пустым)", "")
+        use_caddy = False
+        print("✓ Remote-сервер будет слушать localhost:8099")
+        print("✓ Для HTTPS используй ngrok или самоподписанный сертификат")
 
-    device = ask("Устройство инференса (cpu/cuda)", "cpu")
+    device = ask("\nУстройство инференса (cpu/cuda)", "cpu")
     model = pick_model()
 
-    write_env(domain, key, model, device)
-    write_compose(caddy)
+    write_env(domain, key, model, device, ip_address)
+    write_compose(use_caddy)
 
-    print("\nФайлы готовы:")
-    print(f"  {ENV_PATH}")
-    print(f"  {DEPLOY_DIR / 'docker-compose.remote.yml'}")
-    if caddy:
-        print(f"  {DEPLOY_DIR / 'Caddyfile'}")
-    print("\nДальше на сервере:")
+    print("\n" + "=" * 70)
+    print("Файлы готовы:")
+    print("=" * 70)
+    print(f"  ✓ {ENV_PATH}")
+    print(f"  ✓ {DEPLOY_DIR / 'docker-compose.remote.yml'}")
+    if use_caddy:
+        print(f"  ✓ {DEPLOY_DIR / 'Caddyfile'}")
+
+    print("\n" + "=" * 70)
+    print("Деплой на сервере:")
+    print("=" * 70)
     print("  cd <репозиторий>")
     print("  docker compose -f deploy/docker-compose.remote.yml up -d --build")
-    print("  curl https://<домен>/health   # {" + '"status": "ok"' + "}")
+    
+    if use_caddy:
+        print(f"  curl https://{domain}/health   # {'{'}\"status\": \"ok\"{'}'}")
+    else:
+        print("  curl http://127.0.0.1:8099/health   # {" + '"status": "ok"' + "}")
 
-    if not caddy:
-        print("\nЛокально на машине с камерой (.env):")
-        print("  DOTEYE_REMOTE_PROCESSING=1")
-        print("  DOTEYE_REMOTE_URL=https://<внешний-адрес>")
-        print("  DOTEYE_CRYPTO_KEY=<тот же ключ>")
-        print("  DOTEYE_ALLOWED_URL_HOSTS=<внешний-хост>")
+    if not use_caddy:
+        print("\n" + "=" * 70)
+        print("Настройка HTTPS (обязательно!):")
+        print("=" * 70)
+        print("\nВариант 1: ngrok (проще)")
+        print("  На сервере запусти: ngrok http 8099")
+        print("  ngrok выдаст адрес: https://xxxx-xxx-xxx-xxx.ngrok-free.app")
+        print("  Этот адрес используй в DOTEYE_REMOTE_URL на машине с камерой")
+        print("\nВариант 2: самоподписанный TLS")
+        print("  1. Сгенерируй сертификат:")
+        print("     mkdir -p deploy/tls")
+        print("     openssl req -x509 -newkey rsa:4096 -nodes \\")
+        print("       -keyout deploy/tls/server.key \\")
+        print("       -out deploy/tls/server.crt \\")
+        print(f"       -days 365 -subj \"/CN={ip_address or '<IP-адрес>'}\"")
+        print("  2. Раскомментируй блок volumes и --tls-* в docker-compose.remote.yml")
+        print("  3. Измени порты на \"8099:8099\" в docker-compose.remote.yml")
+        print(f"  4. В DOTEYE_REMOTE_URL используй: https://{ip_address or '<IP-адрес>'}:8099")
 
-    print(
-        f"\nКлюч записан в {ENV_PATH}. Скопируй его же в .env на машине с камерой."
-    )
+    print("\n" + "=" * 70)
+    print("Настройка на машине с камерой (.env):")
+    print("=" * 70)
+    print("  DOTEYE_REMOTE_PROCESSING=1")
+    if use_caddy:
+        print(f"  DOTEYE_REMOTE_URL=https://{domain}")
+        print(f"  DOTEYE_ALLOWED_URL_HOSTS={domain}")
+    else:
+        print("  DOTEYE_REMOTE_URL=https://<ngrok-адрес или IP:8099>")
+        print("  DOTEYE_ALLOWED_URL_HOSTS=<хост из REMOTE_URL>")
+    print(f"  DOTEYE_CRYPTO_KEY={key}")
+
+    print("\n" + "=" * 70)
+    print(f"Ключ сохранён в {ENV_PATH}")
+    print("Скопируй DOTEYE_CRYPTO_KEY в .env на машине с камерой.")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
